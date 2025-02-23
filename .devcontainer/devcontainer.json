@@ -14,7 +14,7 @@
     "workspaceMount": "source=${localWorkspaceFolder},target=/home/turret,type=bind",
     "customizations": {
         "vscode": {
-            "extensions":[
+            "extensions": [
                 "ms-vscode.cpptools",
                 "ms-vscode.cpptools-themes",
                 "ms-vscode.cpptools-extension-pack",
@@ -23,8 +23,8 @@
                 "eamodio.gitlens",
                 "ms-iot.vscode-ros",
                 "oderwat.indent-rainbow",
-                "nonanonno.vscode-ros2"
-
+                "nonanonno.vscode-ros2",
+                "vscode-ext.sync-rsync"
             ]
         }
     },
@@ -37,14 +37,15 @@
         "--net=host",
         "--pid=host",
         "--ipc=host",
-        "-e", "DISPLAY=${env:DISPLAY}",
+        "-e",
+        "DISPLAY=${env:DISPLAY}",
         // "--gpus=all", 
         // "--env", "NVIDIA_DRIVER_CAPABILITIES=all",
         // "--env", "NVIDIA_VISIBLE_DEVICES=all"
     ],
     "mounts": [
-       "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
-       "source=/dev/dri,target=/dev/dri,type=bind,consistency=cached"
+        "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
+        "source=/dev/dri,target=/dev/dri,type=bind,consistency=cached"
     ],
     "postCreateCommand": "sudo rosdep update && sudo rosdep install --from-paths src --ignore-src -y && echo 'source /opt/ros/humble/setup.bash' >> ~/.bashrc"
 }

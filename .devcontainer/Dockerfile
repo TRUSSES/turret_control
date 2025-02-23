@@ -18,6 +18,9 @@ RUN groupadd --gid ${USER_GID} ${USERNAME} && \
     # Fix ownership
     chown -R ${USER_UID}:${USER_GID} /home/${USERNAME}
 
+RUN echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
+    && chmod 0440 /etc/sudoers.d/$USERNAME
+
 RUN sudo apt update && apt upgrade -y
 RUN sudo apt install -y python3-pip
 

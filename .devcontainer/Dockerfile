@@ -1,11 +1,30 @@
-ARG BASE_IMAGE=ros:humble
-FROM ${BASE_IMAGE}
+ARG TARGET_ARCH=arm64
+FROM --platform=linux/${TARGET_ARCH} arm64v8/ros:humble
 
-# User creation with host UID/GID sync
+# Retain user creation
 ARG USERNAME=turret
 ARG USER_UID=1000
 ARG USER_GID=1000
 
+# Use separate layers for caching package installations
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    curl \
+    git \
+    lsb-release \
+    build-essential \
+    python3-colcon-common-extensions \
+    cmake \
+    ninja-build \
+    qemu-user-static \
+    gcc-aarch64-linux-gnu \
+    g++-aarch64-linux-gnu \
+    libc-dev \
+    libstdc++-12-dev \
+    ros-humble-geometry-msgs \
+    libncurses-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create the user and group
 RUN groupadd --gid ${USER_GID} ${USERNAME} && \
     useradd --uid ${USER_UID} --gid ${USER_GID} \
     --create-home --shell /bin/bash ${USERNAME} && \
@@ -21,71 +40,26 @@ RUN groupadd --gid ${USER_GID} ${USERNAME} && \
 RUN echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME
 
-RUN sudo apt update && apt upgrade -y
-RUN sudo apt install -y python3-pip
+USER root
+WORKDIR /home/$USERNAME
 
-WORKDIR /home/turret
+# Set up ROS 2 environment
+RUN echo "source /opt/ros/humble/setup.bash" >> /etc/bash.bashrc
 
-# Install ROS dependencies
-RUN sudo apt update && apt install -y ros-humble-joint-state-publisher ros-humble-joint-state-publisher-gui \
-    ros-humble-xacro ros-humble-ros-core ros-humble-urdf 
+# Set up cross-compilation environment
+ENV CROSS_COMPILE=/usr/bin/aarch64-linux-gnu-
+ENV TARGET_TRIPLE=aarch64-linux-gnu
+ENV SYSROOT=/usr/aarch64-linux-gnu
+ENV CC=${CROSS_COMPILE}gcc
+ENV CXX=${CROSS_COMPILE}g++
+ENV PATH=$PATH:/usr/bin/aarch64-linux-gnu
 
-# Install prerequisites and setup Gazebo Sim and ROS 2 bridge
-RUN sudo apt update && apt install -y \
-    wget \
-    gnupg2 \
-    lsb-release 
+# Force C++17 as the default standard
+ENV CXXFLAGS="-std=c++17"
+ENV CMAKE_CXX_STANDARD=17
 
-# Add Gazebo Sim repository
-RUN wget https://packages.osrfoundation.org/gazebo.gpg -O /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg\
-    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] http://packages.osrfoundation.org/gazebo/ubuntu-stable jammy main" | sudo tee /etc/apt/sources.list.d/gazebo-stable.list > /dev/null
-
-RUN sudo apt update && \
-    sudo apt install -y gz-harmonic ros-humble-ros-gzharmonic libgz-transport14-dev ros-humble-foxglove-bridge ros-humble-rosbag2-storage-mcap
-
-# Set up Gazebo environment variables
-# ENV GAZEBO_MODEL_PATH=/usr/share/gz/models
-# ENV GZ_SIM_RESOURCE_PATH=/usr/share/gz
-
-# 🔹 Use the 64-bit ARM cross-compiler (for Raspberry Pi)
-ENV GNU_HOST=aarch64-linux-gnu
-ENV C_COMPILER_ARM_LINUX=$GNU_HOST-gcc
-ENV CXX_COMPILER_ARM_LINUX=$GNU_HOST-g++
-
-ENV CROSS_INSTALL_PREFIX=/usr/$GNU_HOST
-ENV CROSS_TOOLCHAIN=/arm.toolchain.cmake
-
-# 🔹 Install required cross-compilation tools
-RUN sudo apt-get update && \
-    sudo apt-get --no-install-recommends install -y \
-    autoconf \
-    automake \
-    build-essential \
-    ca-certificates \
-    curl \
-    # C/C++ cross compilers for 64-bit ARM
-    gcc-$GNU_HOST \
-    g++-$GNU_HOST \
-    binutils-$GNU_HOST \
-    libc-dev-arm64-cross \
-    git \
-    gnupg \
-    libssl-dev \
-    openssh-client \
-    pkg-config \
-    software-properties-common \
-    wget && \
-    rm -rf /var/lib/apt/lists/*
-
-# 🔹 Configure CMake for cross-compilation
-WORKDIR /cross-tools
-RUN echo "set(CMAKE_SYSTEM_NAME Linux)" >> arm.toolchain.cmake && \
-    echo "set(CMAKE_SYSTEM_PROCESSOR aarch64)" >> arm.toolchain.cmake && \
-    echo "set(CMAKE_C_COMPILER /usr/bin/$C_COMPILER_ARM_LINUX)" >> arm.toolchain.cmake && \
-    echo "set(CMAKE_CXX_COMPILER /usr/bin/$CXX_COMPILER_ARM_LINUX)" >> arm.toolchain.cmake && \
-    echo "set(CMAKE_PREFIX_PATH $CROSS_INSTALL_PREFIX)" >> arm.toolchain.cmake
-
-# 🔹 Install Pigpio for 64-bit ARM
+# Install pigpio from source with proper cross-compilation as root
+WORKDIR /workspace
 RUN PIGPIO_DIR=/workspace/pigpio && \
     git clone --single-branch --branch master https://github.com/joan2937/pigpio.git $PIGPIO_DIR && \
     cd $PIGPIO_DIR && \
@@ -94,9 +68,5 @@ RUN PIGPIO_DIR=/workspace/pigpio && \
     cd /workspace && \
     rm -rf $PIGPIO_DIR
 
-# 🔹 Verify the compiled library architecture
-RUN file $CROSS_INSTALL_PREFIX/lib/libpigpio.so
-
-# [Optional] Set the default user. Omit if you want to keep the default as root.
+# Switch back to non-root user
 USER $USERNAME
-CMD ["/bin/bash"]

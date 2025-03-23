@@ -1,0 +1,5 @@
+[user]
+	email = paks@seas.upenn.edu
+	name = Akshay Ram Panyam
+[credential]
+	helper = "!f() { /home/turret/.vscode-server/bin/e54c774e0add60467559eb0d1e229c6452cf8447/node /tmp/vscode-remote-containers-b505858d-b8a7-4b66-9eaf-eb202d8a4a11.js git-credential-helper $*; }; f"

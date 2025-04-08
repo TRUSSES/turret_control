@@ -77,12 +77,12 @@ void CubemarsControl::sendCommandMITMode(float pos, float vel, float kp, float k
 
     if (nbytes_ != sizeof(fr))
     {
-        printf("Send Error frame[0]!\r\n");
+        //printf("Send Error frame[0]!\r\n");
         //system("sudo ifconfig can0 down");
     }
 
     if(!waitForReply(kDefaultTimeoutUsecs)){
-        std::cout << "No reply from motor" << std::endl;
+        //std::cout << "No reply from motor" << std::endl;
     }
     //toc("Received and processed reply");
     //std::cout << "Motor ID: " << motor_data_.motor_id << " Position: " << motor_data_.position << " Speed: " << motor_data_.speed << " Temperature: " << motor_data_.temperature << " Error Flag: " << motor_data_.error_flag << std::endl;
@@ -105,7 +105,7 @@ bool CubemarsControl::waitForReply(int timeout_us) {
         return false;
     } else if (retval == 0) {
         // Timeout reached
-        printf("Timeout waiting for reply\n");
+        //printf("Timeout waiting for reply\n");
         return false;
     }
 
@@ -165,7 +165,7 @@ void CubemarsControl::enterMITMode()
     nbytes_ = write(sock_, &cf, sizeof(cf));
     if (nbytes_ != sizeof(cf))
     {
-        printf("Send Error frame[0]!\r\n");
+        //printf("Send Error frame[0]!\r\n");
         //system("sudo ifconfig can0 down");
     }
     if(!waitForReply(kDefaultTimeoutUsecs)){
@@ -192,7 +192,7 @@ void CubemarsControl::zeroMotor()
     nbytes_ = write(sock_, &cf, sizeof(cf));
     if (nbytes_ != sizeof(cf))
     {
-        printf("Send Error frame[0]!\r\n");
+        //printf("Send Error frame[0]!\r\n");
         //system("sudo ifconfig can0 down");
     }
     if(!waitForReply(kZeroMotorTimeoutUsecs)){
@@ -220,7 +220,7 @@ void CubemarsControl::exitMITMode()
 
     if (nbytes_ != sizeof(cf))
     {
-        printf("Send Error frame[0]!\r\n");
+       // printf("Send Error frame[0]!\r\n");
         //system("sudo ifconfig can0 down");
     }
 

@@ -7,6 +7,8 @@ project(turret_dev)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
+find_package(yaml-cpp REQUIRED)
+
 # Add the executable target for your main application
 add_executable(turret
     src/turret_controller.cpp
@@ -22,7 +24,7 @@ add_executable(turret
 target_include_directories(turret PRIVATE include)
 
 # Link pigpio library for the main executable
-target_link_libraries(turret PRIVATE pigpio)
+target_link_libraries(turret PRIVATE pigpio yaml-cpp)
 
 # ---------------------------------------------------
 # GoogleTest Integration for HIL testing

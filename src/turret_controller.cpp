@@ -45,6 +45,12 @@ void TurretController::Stop() {
 // In the future, this could be adapted into a ROS2 node with rclcpp::spin.
 int main(int argc, char* argv[]) {
   // For demonstration, use a dummy socket value (replace with your actual CAN socket descriptor).
+  
+  if (!Config::Instance().Load("config/pin_config.yaml")) {
+    std::cerr << "Error loading config file. Exiting." << std::endl;
+    return 1;
+  }
+
   int socket = 0;
   TurretController controller(socket);
 

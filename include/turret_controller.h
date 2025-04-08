@@ -2,33 +2,32 @@
 #define TURRET_CONTROLLER_H_
 
 #include "turret.h"
+#include <yaml-cpp/yaml.h>
 #include <atomic>
 
 class TurretController {
  public:
-  // Constructs a TurretController.
-  // The socket parameter is passed to the Turret's motor control.
-  explicit TurretController(int socket);
+  // Constructor: accepts the full configuration YAML node.
+  explicit TurretController(const YAML::Node &config);
   ~TurretController();
 
-  // Spins the main control loop.
-  // This method continuously updates the turret and commands actuation until stopped.
+  // Runs the main control loop.
   void Spin();
 
   // Stops the control loop.
   void Stop();
 
-  // Sets the desired goal parameters.
-  //   desired_extension: desired spiral zipper extension (meters)
-  //   desired_pitch: desired turret pitch (degrees)
-  //   desired_yaw: desired turret yaw (degrees) [unused for now]
+  // Allows updating the desired goal parameters at runtime.
   void SetGoalParameters(float desired_extension, float desired_pitch, float desired_yaw);
 
  private:
+  // The Turret object is built from the "turret" sub-node of the config.
   Turret turret_;
+
+  // Running flag for the control loop.
   std::atomic<bool> running_;
 
-  // Goal parameters for turret actuation.
+  // Desired goal parameters for turret actuation.
   float desired_extension_;
   float desired_pitch_;
   float desired_yaw_;

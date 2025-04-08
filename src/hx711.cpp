@@ -1,4 +1,4 @@
-#include "HX711.h"
+#include "hx711.h"
 #include <pigpio.h>
 #include <chrono>
 #include <thread>

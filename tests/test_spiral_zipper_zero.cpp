@@ -1,39 +1,42 @@
 #include <gtest/gtest.h>
 #include "spiral_zipper.h"
+#include "config.h"
+#include <yaml-cpp/yaml.h>
 #include <iostream>
 #include <thread>
 #include <chrono>
 
-// This test verifies that calling SpiralZipper::Zero() retracts the motor until
-// the spiral zipper limit switch is triggered and then resets the encoder count,
-// resulting in an extension close to zero.
-TEST(SpiralZipperTest, ZeroingWorks) {
-  // Create a SpiralZipper instance.
-  // Adjust the pin numbers and parameters as appropriate for your hardware.
-  // Parameters: (servo_pwm_pin, servo_dir_pin, servo_enc_a, servo_enc_b, servo_enable_pin,
-  //              zipper_enc_cs_pin, zipper_enc_clk_pin, zipper_enc_do_pin, limit_switch_pin,
-  //              extension_per_step, debounce_threshold_ms)
-  SpiralZipper zipper(22, 27, 24, 25, 4, 13, 26, 19, 16, 0.000004453125, 30);
-
-  std::cout << "\n----- Spiral Zipper Zeroing Test -----\n";
-  std::cout << "Ensure the spiral zipper is extended and the limit switch is not triggered.\n";
-  std::cout << "When the test begins, the motor will start retracting slowly.\n";
-  std::cout << "Please manually trigger the spiral zipper limit switch to stop the motor, then press Enter...\n";
-
-  // Wait for the user to initiate the test.
+// This test verifies that calling SpiralZipper::Zero() retracts the mechanism until 
+// the limit switch is triggered and then resets the encoder count to near zero.
+TEST(SpiralZipperTest, ZeroingWorksFromConfig) {
+  // Load configuration.
+  if (!Config::Instance().Load("config/config.yaml")) {
+    FAIL() << "Failed to load config.yaml";
+  }
+  YAML::Node config = Config::Instance().GetConfig();
+  YAML::Node zipperConfig = config["spiral_zipper"];
+  
+  // Construct the SpiralZipper instance using the YAML configuration.
+  SpiralZipper zipper(zipperConfig);
+  
+  std::cout << "\n----- Spiral Zipper Zeroing Test (Config) -----\n";
+  std::cout << "Ensure the spiral zipper is extended and its limit switch is not triggered." << std::endl;
+  std::cout << "When the test begins, the motor will start retracting slowly." << std::endl;
+  std::cout << "Please manually trigger the spiral zipper limit switch on GPIO "
+            << zipperConfig["limit_switch_pin"].as<int>()
+            << " to halt retraction, then press Enter..." << std::endl;
+  
   std::cin.get();
-
-  // Call the Zero() method; this should retract the zipper until the limit switch is activated.
+  
+  // Call Zero(), which should retract until the limit switch triggers.
   zipper.Zero();
-
-  // Wait briefly for any asynchronous activities to settle.
+  
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-  // After zeroing, the encoder count should have been reset.
-  // Get the measured extension (in meters).
-  double extension = zipper.GetExtension();
-  std::cout << "Measured extension after zeroing: " << extension << " meters\n";
-
-  // Verify that the extension is near zero.
+  
+  // After zeroing, the encoder count should be approximately zero.
+  int encoderCount = zipper.GetEncoderCount();
+  double extension = encoderCount * zipper.GetExtensionPerStep();
+  std::cout << "Measured extension after zeroing: " << extension << " meters" << std::endl;
+  
   EXPECT_NEAR(extension, 0.0, 1e-6);
 }

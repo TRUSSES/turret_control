@@ -46,13 +46,15 @@ void TurretController::Stop() {
 int main(int argc, char* argv[]) {
   // For demonstration, use a dummy socket value (replace with your actual CAN socket descriptor).
   
-  if (!Config::Instance().Load("config/pin_config.yaml")) {
+  if (!Config::Instance().Load("config/config.yaml")) {
     std::cerr << "Error loading config file. Exiting." << std::endl;
     return 1;
   }
+  YAML::Node config = Config::Instance().GetConfig();
+
 
   int socket = 0;
-  TurretController controller(socket);
+  TurretController controller(config);
 
   float desired_extension = 0.5f;  // meters (example)
   float desired_pitch = 30.0f;     // degrees (example)

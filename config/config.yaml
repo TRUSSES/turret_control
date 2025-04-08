@@ -11,10 +11,24 @@ spiral_zipper:
   extension_per_step: 0.000004453125
   debounce_threshold_ms: 30
 
-turret:
-  turret_encoder_cs_pin: 0
-  turret_encoder_clk_pin: 6
-  turret_encoder_do_pin: 5
-  turret_limit_switch_pin: 20
-  pitch_motor_id: 10   # (0xA in hex)
-  yaw_motor_id: 11     # (0xB in hex)
+turret_encoder:
+  cs_pin: 0
+  clk_pin: 6
+  do_pin: 5
+  encoder_max_value: 1023
+  offset: 0
+
+turret_limit_switch:
+  limit_switch_pin: 20
+  debounce_threshold_ms: 30
+
+pitch_motor:
+  motor_id: 10
+
+yaw_motor:
+  motor_id: 11
+
+socket: 0
+
+x_offset: 0.0
+y_offset: 0.0

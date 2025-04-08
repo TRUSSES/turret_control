@@ -7,16 +7,21 @@ Encoder::Encoder(int cs_pin, int clk_pin, int do_pin, int encoder_max_value, int
       encoder_max_value_(encoder_max_value),
       offset_(offset),
       encoder_count_(0) {
-  // Initialize the previous value using the current reading.
   previous_value_ = Read();
+}
+
+Encoder::Encoder(const YAML::Node &node)
+    : Encoder(node["cs_pin"].as<int>(),
+              node["clk_pin"].as<int>(),
+              node["do_pin"].as<int>(),
+              node["encoder_max_value"] ? node["encoder_max_value"].as<int>() : 1023,
+              node["offset"] ? node["offset"].as<int>() : 0) {
 }
 
 int Encoder::Read() const {
   uint16_t value = 0;
   gpioWrite(cs_pin_, PI_LOW);
   gpioDelay(5);
-
-  // Read 16 bits from the encoder.
   for (int i = 0; i < 16; i++) {
     gpioWrite(clk_pin_, PI_HIGH);
     gpioDelay(5);
@@ -27,17 +32,12 @@ int Encoder::Read() const {
     gpioWrite(clk_pin_, PI_LOW);
     gpioDelay(5);
   }
-
   gpioWrite(cs_pin_, PI_HIGH);
-  // The encoder outputs need to be shifted right by 6 bits.
   value >>= 6;
-
   if (value > static_cast<uint16_t>(encoder_max_value_)) {
     std::cerr << "Warning: Encoder value out of range: " << value << std::endl;
     value &= 0x03FF;
   }
-
-  // Apply offset correction if needed.
   int processed_value = static_cast<int>(value);
   if (offset_ != 0) {
     processed_value -= offset_;

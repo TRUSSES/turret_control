@@ -3,32 +3,19 @@
 
 #include <pigpio.h>
 #include <iostream>
+#include <yaml-cpp/yaml.h>
 
 class Encoder {
  public:
-  // Constructs an Encoder with the specified chip-select, clock, and data GPIO pins.
-  // encoder_max_value is typically 1023 and offset is used for encoders that need calibration (e.g., turret).
   Encoder(int cs_pin, int clk_pin, int do_pin, int encoder_max_value = 1023, int offset = 0);
+  
+  // Overloaded constructor using YAML config.
+  explicit Encoder(const YAML::Node &node);
 
-  // Delete copy constructor and assignment operator.
-  Encoder(const Encoder&) = delete;
-  Encoder& operator=(const Encoder&) = delete;
-
-  // Reads the encoder value by communicating with the encoder hardware,
-  // applies bit-shifting and offset correction, and returns the processed value.
   int Read() const;
-
-  // Updates the cumulative encoder count by comparing the current reading with the previous one,
-  // adjusting for roll-over.
   void Update();
-
-  // Returns the current cumulative encoder count.
   int GetCount() const;
-
-  // Resets the encoder count to zero and updates the previous reading.
   void ResetCount();
-
-  // Sets the offset used to adjust the raw encoder reading.
   void SetOffset(int offset);
 
  private:

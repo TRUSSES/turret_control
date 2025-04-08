@@ -10,13 +10,12 @@
 
 class SpiralZipper {
  public:
-  // Existing constructor (if needed for backward compatibility)
   SpiralZipper(int servo_pwm_pin, int servo_dir_pin, int servo_enc_a, int servo_enc_b,
                int servo_enable_pin, int zipper_enc_cs_pin, int zipper_enc_clk_pin,
                int zipper_enc_do_pin, int limit_switch_pin, double extension_per_step,
                int debounce_threshold_ms);
-
-  // New constructor that reads configuration from a YAML Node.
+  
+  // Overloaded constructor reading from YAML configuration.
   explicit SpiralZipper(const YAML::Node &config);
 
   ~SpiralZipper();

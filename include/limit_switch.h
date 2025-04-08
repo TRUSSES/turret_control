@@ -4,33 +4,22 @@
 #include <chrono>
 #include <functional>
 #include <iostream>
+#include <yaml-cpp/yaml.h>
 
 class LimitSwitch {
  public:
-  // A callback type that is called when the switch state changes.
-  // The boolean parameter is true if the switch is pressed.
   using StateChangeCallback = std::function<void(bool)>;
-
-  // Constructs a LimitSwitch for a given GPIO pin.
-  // debounce_threshold_ms specifies the minimum time between state changes.
+  
+  // Constructor taking explicit parameters.
   LimitSwitch(int gpio_pin, int debounce_threshold_ms = 30);
-
-  // Destructor.
+  
+  // Overloaded constructor that reads its configuration from a YAML node.
+  explicit LimitSwitch(const YAML::Node &node);
+  
   ~LimitSwitch();
 
-  // Delete copy constructor and assignment operator.
-  LimitSwitch(const LimitSwitch&) = delete;
-  LimitSwitch& operator=(const LimitSwitch&) = delete;
-
-  // Processes a GPIO alert.
-  // 'level' is the current reading from the GPIO (LOW means pressed with pull-up).
-  // 'tick' is the tick count from the alert.
   void HandleAlert(int level, uint32_t tick);
-
-  // Returns true if the switch is currently pressed.
   bool IsPressed() const;
-
-  // Sets a callback function to be called when the switch state changes.
   void SetStateChangeCallback(StateChangeCallback callback);
 
  private:

@@ -4,17 +4,16 @@
 
 class Config {
  public:
-  // Returns a reference to the singleton instance.
+  // Returns the singleton instance.
   static Config& Instance();
 
-  // Loads the configuration from the specified YAML file.
+  // Loads the configuration from a YAML file.
   bool Load(const std::string &filename);
 
-  // Returns the root YAML::Node.
+  // Returns the loaded YAML node.
   YAML::Node GetConfig() const;
 
  private:
-  // Private constructor (singleton pattern).
   Config() = default;
   YAML::Node config_;
 };

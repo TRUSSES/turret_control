@@ -4,8 +4,8 @@
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg?style=for-the-badge)](https://en.cppreference.com/w/cpp/17)
 
 
-![Project Banner](https://www.modlabupenn.org/wp-content/uploads/2017/12/DSCF1529-227x300.jpg)  
-*C++ Control Code for the Spiral Zipper Turret.*
+![Project Banner](https://drive.google.com/file/d/1vOpIJWYqArkjfUXqExw0h_km0_sw6xsK/view)  
+
 
 
 ## Table of Contents

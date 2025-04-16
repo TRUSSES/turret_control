@@ -1,25 +1,25 @@
 spiral_zipper:
-  servo_pwm_pin: 22
-  servo_dir_pin: 27
-  servo_enc_a: 24
-  servo_enc_b: 25
-  servo_enable_pin: 4
-  zipper_enc_cs_pin: 13
-  zipper_enc_clk_pin: 26
-  zipper_enc_do_pin: 19
-  limit_switch_pin: 16
+  servo_pwm_pin: 21
+  servo_dir_pin: 20
+  servo_enc_a: 19
+  servo_enc_b: 16
+  servo_enable_pin: 26
+  zipper_enc_cs_pin: 2
+  zipper_enc_clk_pin: 4
+  zipper_enc_do_pin: 3
+  limit_switch_pin: 15
   extension_per_step: 0.000004453125
   debounce_threshold_ms: 30
 
 turret_encoder:
-  cs_pin: 0
+  cs_pin: 12
   clk_pin: 6
-  do_pin: 5
+  do_pin: 13
   encoder_max_value: 1023
   offset: 0
 
 turret_limit_switch:
-  limit_switch_pin: 20
+  limit_switch_pin: 14
   debounce_threshold_ms: 30
 
 pitch_motor:

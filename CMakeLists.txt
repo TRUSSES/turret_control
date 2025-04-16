@@ -42,6 +42,7 @@ target_link_libraries(turret PRIVATE pigpio yaml-cpp)
 add_executable(turret_tests
     tests/test_limit_switches.cpp
     tests/test_spiral_zipper_zero.cpp
+    tests/test_spiral_zipper_motor.cpp
     src/config.cpp
     src/limit_switch.cpp
     src/spiral_zipper.cpp

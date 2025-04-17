@@ -3,7 +3,6 @@ spiral_zipper:
   servo_dir_pin: 20
   servo_enc_a: 19
   servo_enc_b: 16
-  servo_enable_pin: 26
   zipper_enc_cs_pin: 2
   zipper_enc_clk_pin: 4
   zipper_enc_do_pin: 3

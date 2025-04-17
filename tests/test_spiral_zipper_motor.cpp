@@ -5,14 +5,34 @@
 #include <chrono>
 #include <thread>
 #include <iostream>
+#include <cmath>
 
-// Test fixture for ServoCityMotor tests.
+// Define test configuration constants.
+namespace TestConfig {
+  // Desired target velocity (absolute value) for both forward and reverse tests.
+  // The forward target will be positive, and the reverse target is the negative of this value.
+  const double kTargetVelocity = 2.0;  // rad/s
+  
+  // Tolerance for the velocity measurement (allowed deviation from target).
+  const double kVelocityTolerance = 0.1;  // rad/s
+  
+  // Time allowed for the motor to settle after setting a new target.
+  const auto kSettleTime = std::chrono::seconds(1);
+  
+  // Duration over which the test measures the velocity.
+  const auto kMeasurementTime = std::chrono::seconds(5);
+  
+  // Delay between each control loop update during the test.
+  const auto kUpdateDelay = std::chrono::milliseconds(50);
+}
+
+// Test fixture for ServoCityMotor tests. Initializes pigpio and loads config.
 class ServoCityMotorTest : public ::testing::Test {
 protected:
   static void SetUpTestSuite() {
     int ret = gpioInitialise();
     ASSERT_GE(ret, 0) << "Failed to initialize pigpio.";
-    // Load configuration, adjust path if necessary.
+    // Adjust the path to your config file if needed.
     ASSERT_TRUE(Config::Instance().Load("../config/config.yaml")) << "Failed to load config.yaml";
   }
   
@@ -21,102 +41,109 @@ protected:
   }
 };
 
-TEST_F(ServoCityMotorTest, BasicMovementTest) {
+// Test case: Verify the motor reaches its target velocity within the allotted time.
+TEST_F(ServoCityMotorTest, TargetVelocityReachedTest) {
   YAML::Node config = Config::Instance().GetConfig();
-  // Construct the ServoCityMotor using the YAML node "servo_city_motor"
+  // Here, we're using the same YAML node for this test as well.
+  // (Assuming that for testing purposes, a node called "servo_city_motor" exists.)
   ServoCityMotor motor(config["spiral_zipper"]);
-
-  // First, test forward movement
-  double targetVelocityForward = 0.1;  // rad/s
-  motor.setTargetVelocity(targetVelocityForward);
-
-  // Settling period: allow the motor to reach steady-state (1 second)
-  auto settleStart = std::chrono::steady_clock::now();
-  while (std::chrono::steady_clock::now() - settleStart < std::chrono::seconds(1)) {
-    motor.update();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  }
   
-  // Measure velocity over 2 seconds.
-  double sumForward = 0;
-  int samplesForward = 0;
+  // Forward test: set target to positive kTargetVelocity.
+  double targetForward = TestConfig::kTargetVelocity;
+  motor.setTargetVelocity(targetForward);
+  std::cout << "\n[Target Velocity Reached Test - Forward] Waiting for target " 
+            << targetForward << " rad/s..." << std::endl;
+  
+  bool reachedForward = false;
   auto start = std::chrono::steady_clock::now();
-  while (std::chrono::steady_clock::now() - start < std::chrono::seconds(2)) {
+  // Wait for up to 5 seconds for the motor to reach the target.
+  while (std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
     motor.update();
-    sumForward += motor.getCurrentVelocity();
-    samplesForward++;
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    double current = motor.getCurrentVelocity();
+    std::cout << "Current velocity: " << current << " rad/s\r" << std::flush;
+    if (std::fabs(current - targetForward) < TestConfig::kVelocityTolerance) {
+      reachedForward = true;
+      break;
+    }
+    std::this_thread::sleep_for(TestConfig::kUpdateDelay);
   }
-  double measuredForward = (samplesForward > 0 ? sumForward / samplesForward : 0);
-  std::cout << "Measured forward velocity: " << measuredForward << " rad/s" << std::endl;
-  EXPECT_GT(measuredForward, 0.05) << "Motor did not move forward as expected.";
+  std::cout << "\n[Forward] Target reached: " << reachedForward << std::endl;
+  EXPECT_TRUE(reachedForward) << "Motor did not reach forward target velocity within timeout.";
 
-  // Stop the motor briefly between tests.
+  // Stop between tests.
   motor.stop();
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-  // Now test backward movement.
-  double targetVelocityBackward = -0.1;  // rad/s
-  motor.setTargetVelocity(targetVelocityBackward);
+  // Reverse test: set target to negative kTargetVelocity.
+  double targetBackward = -TestConfig::kTargetVelocity;
+  motor.setTargetVelocity(targetBackward);
+  std::cout << "\n[Target Velocity Reached Test - Reverse] Waiting for target " 
+            << targetBackward << " rad/s..." << std::endl;
   
-  // Settling period for backward movement (1 second).
-  settleStart = std::chrono::steady_clock::now();
-  while (std::chrono::steady_clock::now() - settleStart < std::chrono::seconds(1)) {
-    motor.update();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  }
-  
-  double sumBackward = 0;
-  int samplesBackward = 0;
+  bool reachedBackward = false;
   start = std::chrono::steady_clock::now();
-  while (std::chrono::steady_clock::now() - start < std::chrono::seconds(2)) {
+  while (std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
     motor.update();
-    sumBackward += motor.getCurrentVelocity();
-    samplesBackward++;
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    double current = motor.getCurrentVelocity();
+    std::cout << "Current velocity: " << current << " rad/s\r" << std::flush;
+    if (std::fabs(current - targetBackward) < TestConfig::kVelocityTolerance) {
+      reachedBackward = true;
+      break;
+    }
+    std::this_thread::sleep_for(TestConfig::kUpdateDelay);
   }
-  double measuredBackward = (samplesBackward > 0 ? sumBackward / samplesBackward : 0);
-  std::cout << "Measured backward velocity: " << measuredBackward << " rad/s" << std::endl;
-  EXPECT_LT(measuredBackward, -0.05) << "Motor did not move backward as expected.";
+  std::cout << "\n[Reverse] Target reached: " << reachedBackward << std::endl;
+  EXPECT_TRUE(reachedBackward) << "Motor did not reach reverse target velocity within timeout.";
 
   motor.stop();
 }
 
-TEST_F(ServoCityMotorTest, PreciseVelocityMeasurementTest) {
+// Test case: Verify that the motor maintains its target velocity throughout a 5-second run.
+TEST_F(ServoCityMotorTest, MaintainVelocityTest) {
   YAML::Node config = Config::Instance().GetConfig();
-  ServoCityMotor motor(config["servo_city_motor"]);
-
-  auto measure_velocity = [&](double target, int duration_sec) -> double {
+  ServoCityMotor motor(config["spiral_zipper"]);
+  
+  auto checkMaintainedVelocity = [&](double target) -> bool {
     motor.setTargetVelocity(target);
-    
-    // Settling period: allow the motor to stabilize (1 second)
+    // Settling period to allow the motor to stabilize.
     auto settleStart = std::chrono::steady_clock::now();
-    while (std::chrono::steady_clock::now() - settleStart < std::chrono::seconds(1)) {
+    while (std::chrono::steady_clock::now() - settleStart < TestConfig::kSettleTime) {
       motor.update();
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      std::this_thread::sleep_for(TestConfig::kUpdateDelay);
     }
-    
-    double sum = 0;
-    int samples = 0;
-    auto start = std::chrono::steady_clock::now();
-    while (std::chrono::steady_clock::now() - start < std::chrono::seconds(duration_sec)) {
+  
+    bool maintained = true;
+    auto sampleStart = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - sampleStart < TestConfig::kMeasurementTime) {
       motor.update();
-      sum += motor.getCurrentVelocity();
-      samples++;
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      double currentVel = motor.getCurrentVelocity();
+      std::cout << (target > 0 ? "Forward" : "Reverse")
+                << ": current velocity = " << currentVel << " rad/s\r" << std::flush;
+      if (std::fabs(currentVel - target) > TestConfig::kVelocityTolerance) {
+        maintained = false;
+        std::cout << "\nVelocity out of tolerance: " << currentVel << " rad/s" << std::endl;
+      }
+      std::this_thread::sleep_for(TestConfig::kUpdateDelay);
     }
-    // Only stop after measurement
-    motor.stop();
-    return (samples > 0 ? sum / samples : 0);
+    return maintained;
   };
 
-  double targetForward = 0.1; // rad/s
-  double measuredForward = measure_velocity(targetForward, 5);
-  std::cout << "Average measured forward velocity: " << measuredForward << " rad/s" << std::endl;
-  EXPECT_NEAR(measuredForward, targetForward, 0.02) << "Forward velocity mismatch.";
+  // Check forward maintenance.
+  double targetForward = TestConfig::kTargetVelocity;
+  bool forwardMaintained = checkMaintainedVelocity(targetForward);
+  std::cout << "\n[Forward Maintain Test] Velocity maintained: " 
+            << (forwardMaintained ? "Yes" : "No") << std::endl;
+  EXPECT_TRUE(forwardMaintained) << "Motor did not maintain forward target velocity.";
+  
+  motor.stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-  double targetBackward = -0.1; // rad/s
-  double measuredBackward = measure_velocity(targetBackward, 5);
-  std::cout << "Average measured backward velocity: " << measuredBackward << " rad/s" << std::endl;
-  EXPECT_NEAR(measuredBackward, targetBackward, 0.02) << "Backward velocity mismatch.";
+  // Check reverse maintenance.
+  double targetBackward = -TestConfig::kTargetVelocity;
+  bool backwardMaintained = checkMaintainedVelocity(targetBackward);
+  std::cout << "\n[Reverse Maintain Test] Velocity maintained: " 
+            << (backwardMaintained ? "Yes" : "No") << std::endl;
+  EXPECT_TRUE(backwardMaintained) << "Motor did not maintain reverse target velocity.";
+  
+  motor.stop();
 }

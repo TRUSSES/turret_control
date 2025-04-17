@@ -9,11 +9,20 @@
 #include <unistd.h>
 #include <yaml-cpp/yaml.h>
 
+/**
+ * @brief ServoCityMotor controls the servocity brushed DC motor with encoder feedback.
+ * 
+ * This implementation uses sign-magnitude control: the PWM duty cycle (scaled to 0–255)
+ * controls the speed, and the DIR pin is set according to the sign of the control output.
+ */
 class ServoCityMotor {
  public:
-  ServoCityMotor(int pwm_pin, int dir_pin, int enc_a, int enc_b, int enable_pin);
+  ServoCityMotor(int pwm_pin, int dir_pin, int enc_a, int enc_b);
   
-  // Overloaded constructor that loads configuration from YAML.
+  /**
+   * @brief Constructs a ServoCityMotor using configuration from a YAML node.
+   * Expects keys: "servo_pwm_pin", "servo_dir_pin", "servo_enc_a", "servo_enc_b".
+   */
   explicit ServoCityMotor(const YAML::Node &node);
   
   ~ServoCityMotor();
@@ -23,9 +32,10 @@ class ServoCityMotor {
   void update();
   void stop();
 
-  // New method to directly set motor output.
+  /// Set the PWM output directly.
   void setMotorOutput(int pwm);
 
+  // Debug variables:
   std::atomic<int> encoder_count{0};
   std::atomic<int> raw_a{0};
   std::atomic<int> raw_b{0};
@@ -36,8 +46,8 @@ class ServoCityMotor {
   const int dir_pin_;
   const int enc_a_;
   const int enc_b_;
-  const int enable_pin_;
-
+  
+  // Motor parameters
   const double max_rpm_ = 100.0;
   const double gear_ratio_ = 188.0;
   const double counts_per_rev_ = 5281.1;
@@ -45,9 +55,10 @@ class ServoCityMotor {
   std::atomic<double> current_velocity_{0.0};
   double target_velocity_ = 0.0;
 
-  const double Kp_ = 0.3;
-  const double Ki_ = 0.5;
-  const double Kd_ = 0.02;
+  // PID control parameters
+  const double Kp_ = 0.6;
+  const double Ki_ = 0.2;
+  const double Kd_ = 0.05;
   double integral_ = 0.0;
   double prev_error_ = 0.0;
 

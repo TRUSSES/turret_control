@@ -4,25 +4,25 @@
 
 ServoCityMotor* ServoCityMotor::instance = nullptr;
 
-ServoCityMotor::ServoCityMotor(int pwm_pin, int dir_pin, int enc_a, int enc_b, int enable_pin)
+ServoCityMotor::ServoCityMotor(int pwm_pin, int dir_pin, int enc_a, int enc_b)
     : pwm_pin_(pwm_pin),
       dir_pin_(dir_pin),
       enc_a_(enc_a),
-      enc_b_(enc_b),
-      enable_pin_(enable_pin) {
+      enc_b_(enc_b) {
   // Initialize pigpio
   if (gpioInitialise() < 0) {
     std::cerr << "pigpio initialization failed" << std::endl;
     exit(1);
   }
 
-  // Configure pins
+  // Configure PWM pin and direction pin
   gpioSetMode(pwm_pin_, PI_OUTPUT);
   gpioSetMode(dir_pin_, PI_OUTPUT);
+  // Set PWM frequency to 10 kHz (adjustable; around 20 kHz is recommended for sign-magnitude)
   gpioSetPWMfrequency(pwm_pin_, 10000);
   gpioWrite(dir_pin_, 0);
-  gpioSetMode(enable_pin_, PI_OUTPUT);
-  gpioWrite(enable_pin_, 1);
+
+  // Configure encoder pins
   gpioSetMode(enc_a_, PI_INPUT);
   gpioSetMode(enc_b_, PI_INPUT);
   gpioSetPullUpDown(enc_a_, PI_PUD_UP);
@@ -30,38 +30,35 @@ ServoCityMotor::ServoCityMotor(int pwm_pin, int dir_pin, int enc_a, int enc_b, i
   gpioGlitchFilter(enc_a_, 1000);
   gpioGlitchFilter(enc_b_, 1000);
 
-  // Register the encoder ISR
+  // Register encoder ISR for both encoder pins
   gpioSetISRFunc(enc_a_, EITHER_EDGE, 0, encoderISR);
   gpioSetISRFunc(enc_b_, EITHER_EDGE, 0, encoderISR);
 
-  // Set the static instance pointer for ISR callbacks
+  // Set static instance for ISR callbacks.
   instance = this;
 
   last_update_ = std::chrono::steady_clock::now();
   last_encoder_time_ = std::chrono::steady_clock::now();
 
-  // Debug printing to confirm initialization
+  // Debug messages to verify initialization.
   std::cout << "ServoCityMotor initialized:" << std::endl;
   std::cout << "  PWM Pin: " << pwm_pin_ << std::endl;
   std::cout << "  Dir Pin: " << dir_pin_ << std::endl;
   std::cout << "  Encoder A: " << enc_a_ << std::endl;
   std::cout << "  Encoder B: " << enc_b_ << std::endl;
-  std::cout << "  Enable Pin: " << enable_pin_ << std::endl;
 }
 
 ServoCityMotor::ServoCityMotor(const YAML::Node &node)
     : ServoCityMotor(node["servo_pwm_pin"].as<int>(),
                      node["servo_dir_pin"].as<int>(),
                      node["servo_enc_a"].as<int>(),
-                     node["servo_enc_b"].as<int>(),
-                     node["servo_enable_pin"].as<int>()) {
-  // Additional debug print to show config values
-  // std::cout << "ServoCityMotor constructed from YAML config:" << std::endl;
-  // std::cout << "  servo_pwm_pin: " << node["servo_pwm_pin"].as<int>() << std::endl;
-  // std::cout << "  servo_dir_pin: " << node["servo_dir_pin"].as<int>() << std::endl;
-  // std::cout << "  servo_enc_a: " << node["servo_enc_a"].as<int>() << std::endl;
-  // std::cout << "  servo_enc_b: " << node["servo_enc_b"].as<int>() << std::endl;
-  // std::cout << "  servo_enable_pin: " << node["servo_enable_pin"].as<int>() << std::endl;
+                     node["servo_enc_b"].as<int>()) {
+  // Debug print loaded configuration.
+  std::cout << "ServoCityMotor constructed from YAML config:" << std::endl;
+  std::cout << "  servo_pwm_pin: " << node["servo_pwm_pin"].as<int>() << std::endl;
+  std::cout << "  servo_dir_pin: " << node["servo_dir_pin"].as<int>() << std::endl;
+  std::cout << "  servo_enc_a: " << node["servo_enc_a"].as<int>() << std::endl;
+  std::cout << "  servo_enc_b: " << node["servo_enc_b"].as<int>() << std::endl;
 }
 
 ServoCityMotor::~ServoCityMotor() {
@@ -84,40 +81,48 @@ void ServoCityMotor::update() {
 
   double current = current_velocity_.load();
   double error = target_velocity_ - current;
-  
+
   integral_ += error * dt;
-  if(integral_ < -1.0)
-    integral_ = -1.0;
-  else if(integral_ > 1.0)
-    integral_ = 1.0;
-  
+  integral_ = std::clamp(integral_, -1.0, 1.0);
   double derivative = (error - prev_error_) / dt;
   prev_error_ = error;
-  
+
   double output = Kp_ * error + Ki_ * integral_ + Kd_ * derivative;
-  if (output < -1.0)
-    output = -1.0;
-  else if (output > 1.0)
-    output = 1.0;
-  
+  output = std::clamp(output, -1.0, 1.0);
+
+  // Filter the output for stability.
   output_filter_ = (1.0 - filter_gain_) * output_filter_ + filter_gain_ * output;
-  std::cout << "Velocity output: " << output_filter_ << std::endl;
-  
-  if (fabs(output_filter_) > 0.05) {
+  //std::cout << "Velocity output filter value: " << output_filter_ << std::endl;
+
+  // Sign-magnitude PWM:
+  // If the filtered output is below threshold, brake by setting PWM to 0.
+  const double threshold = 0.05;
+  int duty_cycle = 0;
+  if (fabs(output_filter_) > threshold) {
+    // Calculate the duty cycle based on the absolute output value.
+    duty_cycle = static_cast<int>(fabs(output_filter_) * 255.0);
+    // Enforce a minimum duty cycle (around 5%).
+    if (duty_cycle < 13) {
+      duty_cycle = 13;
+    }
+    // Set the direction pin based on the sign.
     gpioWrite(dir_pin_, output_filter_ > 0 ? 1 : 0);
-    gpioPWM(pwm_pin_, static_cast<int>(fabs(output_filter_) * 255));
   } else {
-    gpioPWM(pwm_pin_, 0);
+    duty_cycle = 0;
   }
-  
+
+  // Generate the PWM signal with the calculated duty cycle.
+  gpioPWM(pwm_pin_, duty_cycle);
+
   auto now_enc = std::chrono::steady_clock::now();
   double dt_enc = std::chrono::duration<double>(now_enc - last_encoder_time_).count();
   if(dt_enc > 0.01) {
     int counts = encoder_count.exchange(0);
     double delta_rad = countsToRadians(counts);
     double raw_velocity = delta_rad / dt_enc;
-    
-    velocity_filter_ = (1.0 - velocity_filter_gain_) * velocity_filter_ + velocity_filter_gain_ * raw_velocity;
+
+    velocity_filter_ = (1.0 - velocity_filter_gain_) * velocity_filter_ +
+                       velocity_filter_gain_ * raw_velocity;
     current_velocity_ = velocity_filter_;
     last_encoder_time_ = now_enc;
   }
@@ -158,7 +163,6 @@ double ServoCityMotor::countsToRadians(int counts) const {
 
 void ServoCityMotor::stop() {
   gpioPWM(pwm_pin_, 0);
-  gpioWrite(enable_pin_, 0);
   integral_ = 0.0;
   prev_error_ = 0.0;
 }

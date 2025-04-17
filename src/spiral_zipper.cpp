@@ -6,15 +6,16 @@
 #include <algorithm>
 
 SpiralZipper::SpiralZipper(int servo_pwm_pin, int servo_dir_pin, int servo_enc_a, int servo_enc_b,
-                           int servo_enable_pin, int zipper_enc_cs_pin, int zipper_enc_clk_pin,
+                           int zipper_enc_cs_pin, int zipper_enc_clk_pin,
                            int zipper_enc_do_pin, int limit_switch_pin, double extension_per_step,
                            int debounce_threshold_ms)
-    : servo_motor_(servo_pwm_pin, servo_dir_pin, servo_enc_a, servo_enc_b, servo_enable_pin),
+    : servo_motor_(servo_pwm_pin, servo_dir_pin, servo_enc_a, servo_enc_b),
       zipper_encoder_(zipper_enc_cs_pin, zipper_enc_clk_pin, zipper_enc_do_pin, 1023, 0),
       limit_switch_(limit_switch_pin, debounce_threshold_ms),
       extension_per_step_(extension_per_step),
       kp_(0.15),
       direction_(0) {
+  // Additional initialization can be done here if needed.
 }
 
 SpiralZipper::SpiralZipper(const YAML::Node &config)
@@ -22,7 +23,6 @@ SpiralZipper::SpiralZipper(const YAML::Node &config)
                    config["servo_dir_pin"].as<int>(),
                    config["servo_enc_a"].as<int>(),
                    config["servo_enc_b"].as<int>(),
-                   config["servo_enable_pin"].as<int>(),
                    config["zipper_enc_cs_pin"].as<int>(),
                    config["zipper_enc_clk_pin"].as<int>(),
                    config["zipper_enc_do_pin"].as<int>(),
@@ -32,69 +32,55 @@ SpiralZipper::SpiralZipper(const YAML::Node &config)
 }
 
 SpiralZipper::~SpiralZipper() {
-  // Optionally, stop the motor here.
+  // Optionally: stop the motor.
 }
 
 void SpiralZipper::Zero() {
-  // Retract slowly until the limit switch is triggered.
+  // For zeroing, we want to slowly retract the actuator.
+  // Use a low negative target velocity for this purpose.
+  const double retract_velocity = -0.3;  // rad/s (adjust for your system)
+  servo_motor_.setTargetVelocity(retract_velocity);
+
+  // Run the control loop until the limit switch signals that zero has been reached.
   while (!limit_switch_.IsPressed()) {
-    SetMotorOutput(1650); // Example PWM value to retract slowly.
+    servo_motor_.update();
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  SetMotorOutput(1500); // Stop the motor.
+
+  // Once the switch is triggered, stop the motor.
+  servo_motor_.setTargetVelocity(0);
+  // Allow the motor to settle.
+  while (std::fabs(servo_motor_.getCurrentVelocity()) > 0.01) {
+    servo_motor_.update();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  
+  // Reset the encoder count after zeroing.
   zipper_encoder_.ResetCount();
 }
 
 void SpiralZipper::ActuateLength(float goal_dist) {
+  // Convert goal distance (in meters) to encoder counts.
   int goal_count = static_cast<int>(goal_dist / extension_per_step_);
+  
+  // Update encoder count.
   zipper_encoder_.Update();
   int current_count = zipper_encoder_.GetCount();
   int error_counts = goal_count - current_count;
-  double target_velocity = kp_ * error_counts;
-
-  if (limit_switch_.IsPressed() && current_count > goal_count) {
-    SetMotorOutput(1500);
-  } else {
-    int pwm_value = ComputePWM(goal_count, current_count);
-    SetMotorOutput(pwm_value);
-  }
-}
-
-int SpiralZipper::ComputePWM(int goal_count, int current_count) {
-  int error = goal_count - current_count;
-  int pwm_calculated = static_cast<int>(error * kp_ + 1500);
-  const int deadband = 200;
-  int control_action = 1500;
   
-  if (error > deadband / 2) {
-    control_action = std::max(1350, std::min(1000, pwm_calculated));  // Example values.
-    direction_ = -1;
-  } else if (error < -deadband / 2) {
-    control_action = std::max(1650, std::min(2000, pwm_calculated));
-    direction_ = 1;
+  // Compute a target velocity for the motor based on the positional error.
+  // In sign-magnitude control, we use the new motor interface.
+  double target_velocity = kp_ * error_counts;
+  
+  // If the limit switch is triggered and the actuator is beyond the goal,
+  // stop the motor.
+  if (limit_switch_.IsPressed() && current_count > goal_count) {
+    servo_motor_.setTargetVelocity(0);
   } else {
-    if (direction_ == -1) {
-      if (error > 0) {
-        control_action = std::max(1350, std::min(1000, pwm_calculated));
-      } else {
-        direction_ = 0;
-      }
-    } else if (direction_ == 1) {
-      if (error < 0) {
-        control_action = std::max(1650, std::min(2000, pwm_calculated));
-      } else {
-        direction_ = 0;
-      }
-    }
-    if (direction_ == 0) {
-      control_action = 1500;
-    }
+    servo_motor_.setTargetVelocity(target_velocity);
   }
-  return control_action;
-}
-
-void SpiralZipper::SetMotorOutput(int pwm_value) {
-  servo_motor_.setMotorOutput(pwm_value);
+  
+  // Let the control loop (update()) run externally.
 }
 
 int SpiralZipper::GetEncoderCount() const {

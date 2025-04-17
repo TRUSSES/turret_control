@@ -10,7 +10,7 @@ Turret::Turret(int socket, float x_offset, float y_offset)
       turret_limit_switch_(20, 30),
       pitch_motor_(0xA, socket),
       yaw_motor_(0xB, socket),
-      spiral_zipper_(22, 27, 24, 25, 4, 13, 26, 19, 16, 0.000004453125, 30),
+      spiral_zipper_(22, 27, 24, 25, 4, 13, 19, 16, 0.000004453125, 30),
       x_offset_(x_offset),
       y_offset_(y_offset),
       prev_turret_angle_(0.0),

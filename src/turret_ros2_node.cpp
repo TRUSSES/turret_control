@@ -8,6 +8,7 @@
 #include "turret_control/srv/set_state.hpp"
 #include "turret.h"
 #include "config.h"
+#include "load_cell.h"
 #include <chrono>
 #include <memory>
 #include <thread>
@@ -104,6 +105,9 @@ public:
             return;
         }
 
+        // Initialize load cells
+        initializeLoadCells();
+        
         // Initialize state machine
         current_state_ = TurretState::IDLE;
         is_zeroed_ = false;
@@ -186,9 +190,11 @@ private:
 
     // Core components
     std::unique_ptr<Turret> turret_;
+    std::unique_ptr<LoadCell> load_cell_;
     YAML::Node config_;
     int turret_id_;
     std::string topic_prefix_;
+    bool load_cell_ready_;
     
     // State machine variables
     TurretState current_state_;
@@ -343,6 +349,20 @@ private:
         state_msg.extension_length = current_extension_;
         state_msg.velocity = current_velocity_;
         state_msg.is_zeroed = is_zeroed_;
+        state_msg.load_cell_ready = load_cell_ready_;
+        
+        // Get force data when in RUNNING state and load cells are ready
+        if (current_state_ == TurretState::RUNNING && load_cell_ready_ && load_cell_) {
+            try {
+                state_msg.force = load_cell_->getForce("N");
+            } catch (const std::exception& e) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, 
+                    "Failed to read force data: %s", e.what());
+                state_msg.force = 0.0;
+            }
+        } else {
+            state_msg.force = 0.0;
+        }
         
         switch (current_state_) {
             case TurretState::IDLE:
@@ -357,6 +377,45 @@ private:
         }
         
         state_pub_->publish(state_msg);
+    }
+    
+    void initializeLoadCells()
+    {
+        load_cell_ready_ = false;
+        
+        try {
+            load_cell_ = std::make_unique<LoadCell>();
+            
+            // Try different paths for load cell config file, similar to main config
+            std::string config_filename = "turret_" + std::to_string(turret_id_) + "_lc_config.cfg";
+            std::vector<std::string> config_paths = {
+                "config/" + config_filename,
+                "../config/" + config_filename,
+                "/home/turret/ros_ws/src/turret_control/config/" + config_filename,
+                config_filename  // Try current directory as fallback
+            };
+            
+            bool loaded = false;
+            for (const auto& config_path : config_paths) {
+                if (load_cell_->loadCalibrationData(config_path)) {
+                    load_cell_ready_ = true;
+                    loaded = true;
+                    RCLCPP_INFO(this->get_logger(), "Load cells initialized successfully with config: %s", config_path.c_str());
+                    break;
+                }
+            }
+            
+            if (!loaded) {
+                RCLCPP_WARN(this->get_logger(), "Failed to load load cell calibration from any attempted path:");
+                for (const auto& path : config_paths) {
+                    RCLCPP_WARN(this->get_logger(), "  - %s", path.c_str());
+                }
+                RCLCPP_WARN(this->get_logger(), "Load cells will not be available until calibrated");
+                RCLCPP_INFO(this->get_logger(), "To calibrate: ros2 run turret_control calibrate_load_cells config/%s", config_filename.c_str());
+            }
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "Failed to initialize load cells: %s", e.what());
+        }
     }
     
     void debugLog()

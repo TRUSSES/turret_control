@@ -1,0 +1,10 @@
+# Service to change turret state
+uint8 IDLE = 0
+uint8 READY = 1
+uint8 RUNNING = 2
+
+uint8 desired_state
+---
+bool success
+string message
+uint8 current_state

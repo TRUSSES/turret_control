@@ -34,30 +34,31 @@ int Encoder::Read() const {
   }
   gpioWrite(cs_pin_, PI_HIGH);
   value >>= 6;
-  if (value > static_cast<uint16_t>(encoder_max_value_)) {
+
+  // Check if the value is in the expected 10-bit range (0-1023)
+  if (value > 1023) {
     std::cerr << "Warning: Encoder value out of range: " << value << std::endl;
-    value &= 0x03FF;
+    value &= 0x03FF; // Mask to keep it within 10 bits
   }
-  int processed_value = static_cast<int>(value);
-  if (offset_ != 0) {
-    processed_value -= offset_;
-    if (processed_value < 0) {
-      processed_value += (encoder_max_value_ + 1);
-    } else if (processed_value > encoder_max_value_) {
-      processed_value -= (encoder_max_value_ + 1);
-    }
-  }
-  return processed_value;
+
+  return value;
 }
 
 void Encoder::Update() {
   int current_value = Read();
   int difference = current_value - previous_value_;
+  
+  // Handle wrap-around based on the direction of movement
+  // This matches the reference implementation logic
   if (difference > encoder_max_value_ / 2) {
+    // Positive wrap-around (e.g., from 1023 to 0)
     difference -= (encoder_max_value_ + 1);
   } else if (difference < -encoder_max_value_ / 2) {
+    // Negative wrap-around (e.g., from 0 to 1023)
     difference += (encoder_max_value_ + 1);
   }
+  
+  // Update continuous encoder count (subtract like reference implementation)
   encoder_count_ -= difference;
   previous_value_ = current_value;
 }

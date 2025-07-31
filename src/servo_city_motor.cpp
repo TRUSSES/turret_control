@@ -66,7 +66,17 @@ ServoCityMotor::~ServoCityMotor() {
 }
 
 void ServoCityMotor::setTargetVelocity(double target_rad_per_sec) {
-  std::cout << "Setting target velocity: " << target_rad_per_sec << " rad/s" << std::endl;
+  // Log only when target velocity changes significantly or starts/stops
+  static double last_logged_velocity = 999.0;  // Initialize to impossible value
+  
+  // Log when velocity changes significantly (> 0.1 rad/s) or when starting/stopping
+  if (std::abs(target_rad_per_sec - last_logged_velocity) > 0.1 || 
+      (last_logged_velocity != 0.0 && target_rad_per_sec == 0.0) ||
+      (last_logged_velocity == 0.0 && target_rad_per_sec != 0.0)) {
+    // std::cout << "ServoCityMotor: Setting target velocity: " << target_rad_per_sec << " rad/s" << std::endl;
+    last_logged_velocity = target_rad_per_sec;
+  }
+  
   target_velocity_ = target_rad_per_sec;
 }
 
@@ -92,7 +102,14 @@ void ServoCityMotor::update() {
 
   // Filter the output for stability.
   output_filter_ = (1.0 - filter_gain_) * output_filter_ + filter_gain_ * output;
-  //std::cout << "Velocity output filter value: " << output_filter_ << std::endl;
+  
+  // Uncomment for debugging velocity control:
+  // static int debug_counter = 0;
+  // if (++debug_counter % 50 == 0) {
+  //   std::cout << "PID Debug - Target: " << target_velocity_ << ", Current: " << current 
+  //             << ", Error: " << error << ", Output: " << output_filter_ 
+  //             << ", PWM: " << static_cast<int>(fabs(output_filter_) * 255.0) << std::endl;
+  // }
 
   // Sign-magnitude PWM:
   // If the filtered output is below threshold, brake by setting PWM to 0.
@@ -101,10 +118,12 @@ void ServoCityMotor::update() {
   if (fabs(output_filter_) > threshold) {
     // Calculate the duty cycle based on the absolute output value.
     duty_cycle = static_cast<int>(fabs(output_filter_) * 255.0);
+    
     // Enforce a minimum duty cycle (around 5%).
     if (duty_cycle < 13) {
       duty_cycle = 13;
     }
+    
     // Set the direction pin based on the sign.
     gpioWrite(dir_pin_, output_filter_ > 0 ? 1 : 0);
   } else {

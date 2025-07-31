@@ -22,6 +22,16 @@ class Turret {
   bool ActuateTurretCable(float goal_dist, float desired_pitch_deg, float yaw);
   void Update();
   double GetTurretAngle() const;
+  
+  // Spiral zipper control methods for ROS2 integration
+  void ZeroSpiralZipper();
+  void ZeroSpiralZipper(double retract_velocity);
+  void ActuateSpiralZipperLength(float goal_dist);
+  void ActuateSpiralZipperLength(float goal_dist, double max_velocity);
+  void StopSpiralZipper();
+  double GetSpiralZipperExtension() const;
+  double GetSpiralZipperVelocity() const;
+  int GetSpiralZipperEncoderCount() const;
 
  private:
   Encoder turret_encoder_;

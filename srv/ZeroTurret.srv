@@ -1,0 +1,4 @@
+# Service to zero the turret
+---
+bool success
+string message

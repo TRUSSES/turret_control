@@ -10,7 +10,7 @@ Turret::Turret(int socket, float x_offset, float y_offset)
       turret_limit_switch_(20, 30),
       pitch_motor_(0xA, socket),
       yaw_motor_(0xB, socket),
-      spiral_zipper_(22, 27, 24, 25, 4, 13, 19, 16, 0.000004453125, 30),
+      spiral_zipper_(22, 27, 24, 25, 4, 13, 19, 16, 0.0005725, 30),
       x_offset_(x_offset),
       y_offset_(y_offset),
       prev_turret_angle_(0.0),
@@ -47,6 +47,7 @@ double Turret::GetTurretAngle() const {
 void Turret::Update() {
   turret_encoder_.Update();
   spiral_zipper_.UpdateEncoder();
+  spiral_zipper_.UpdateMotor();  // Critical: Update motor control loop
   auto now = std::chrono::steady_clock::now();
   double dt = std::chrono::duration<double>(now - last_turret_time_).count();
   if(dt > 0.01) {
@@ -61,8 +62,8 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_deg, float 
   turret_encoder_.Update();
   spiral_zipper_.UpdateEncoder();
 
-  // Calculate spiral zipper extension from its encoder.
-  double L = spiral_zipper_.GetEncoderCount() * spiral_zipper_.GetExtensionPerStep();
+  // Get the current spiral zipper extension (in meters).
+  double L = spiral_zipper_.GetExtension();
   double turret_angle = GetTurretAngle();
   double current_r = x_offset_ + L * cos(turret_angle);
   double current_theta = atan((y_offset_ - L * sin(turret_angle)) / (x_offset_ + L * cos(turret_angle)));
@@ -94,4 +95,36 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_deg, float 
   bool zipper_reached = (fabs(goal_dist - L) < 0.001);
   bool cable_reached = (fabs(error) < cable_tolerance);
   return (zipper_reached && cable_reached);
+}
+
+void Turret::ZeroSpiralZipper() {
+  spiral_zipper_.Zero();
+}
+
+void Turret::ZeroSpiralZipper(double retract_velocity) {
+  spiral_zipper_.Zero(retract_velocity);
+}
+
+void Turret::ActuateSpiralZipperLength(float goal_dist) {
+  spiral_zipper_.ActuateLength(goal_dist);
+}
+
+void Turret::ActuateSpiralZipperLength(float goal_dist, double max_velocity) {
+  spiral_zipper_.ActuateLength(goal_dist, max_velocity);
+}
+
+void Turret::StopSpiralZipper() {
+  spiral_zipper_.Stop();
+}
+
+double Turret::GetSpiralZipperExtension() const {
+  return spiral_zipper_.GetExtension();
+}
+
+double Turret::GetSpiralZipperVelocity() const {
+  return spiral_zipper_.GetMotorVelocity();
+}
+
+int Turret::GetSpiralZipperEncoderCount() const {
+  return spiral_zipper_.GetEncoderCount();
 }

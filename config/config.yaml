@@ -1,8 +1,8 @@
 spiral_zipper:
   servo_pwm_pin: 21
   servo_dir_pin: 20
-  servo_enc_a: 19
-  servo_enc_b: 16
+  servo_enc_a: 16
+  servo_enc_b: 19
   zipper_enc_cs_pin: 2
   zipper_enc_clk_pin: 4
   zipper_enc_do_pin: 3
@@ -31,3 +31,5 @@ socket: 0
 
 x_offset: 0.0
 y_offset: 0.0
+
+turret_id: 1

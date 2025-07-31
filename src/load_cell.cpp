@@ -7,9 +7,9 @@
 
 // Constructor: initialize HX711 objects with your default wiring.
 LoadCell::LoadCell()
-    : hx1(17, 27, 128, 'A'),
-      hx2(22, 27, 128, 'A'),
-      hx3(24, 27, 128, 'A'),
+    : hx1(22, 27, 128, 'A'),
+      hx2(24, 27, 128, 'A'),
+      hx3(25, 27, 128, 'A'),
       global_m(0.0),
       global_b(0.0)
 {

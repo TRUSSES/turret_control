@@ -1,6 +1,6 @@
 #include <iostream>
 #include <pigpio.h>
-#include "LoadCell.h"
+#include "load_cell.h"
 
 int main(int argc, char** argv) {
     if (argc < 2) {

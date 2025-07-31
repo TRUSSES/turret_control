@@ -105,6 +105,17 @@ target_include_directories(turret_legacy PRIVATE include)
 target_link_libraries(turret_legacy PRIVATE pigpio yaml-cpp)
 
 # -------------------------------
+# Calibration executable
+# -------------------------------
+add_executable(calibrate_load_cells
+    scripts/calibrate_load_cells.cpp
+    src/load_cell.cpp
+    src/hx711.cpp
+)
+target_include_directories(calibrate_load_cells PRIVATE include)
+target_link_libraries(calibrate_load_cells PRIVATE pigpio)
+
+# -------------------------------
 # Test target: turret_tests executable
 # -------------------------------
 add_executable(turret_tests
@@ -134,7 +145,7 @@ add_test(NAME turret_tests COMMAND turret_tests)
 # -------------------------------
 # ROS2 Installation
 # -------------------------------
-install(TARGETS turret_ros2_node turret_legacy
+install(TARGETS turret_ros2_node turret_legacy calibrate_load_cells
   DESTINATION lib/${PROJECT_NAME}
 )
 

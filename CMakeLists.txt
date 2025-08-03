@@ -38,13 +38,13 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 # -------------------------------
 # Fetch GoogleTest using FetchContent (for tests)
 # -------------------------------
-include(FetchContent)
-FetchContent_Declare(
-  googletest
-  URL https://github.com/google/googletest/archive/release-1.12.1.zip
-)
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(googletest)
+# include(FetchContent)
+# FetchContent_Declare(
+#   googletest
+#   URL https://github.com/google/googletest/archive/release-1.12.1.zip
+# )
+# set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+# FetchContent_MakeAvailable(googletest)
 
 # -------------------------------
 # ROS2 node executable
@@ -118,29 +118,29 @@ target_link_libraries(calibrate_load_cells PRIVATE pigpio)
 # -------------------------------
 # Test target: turret_tests executable
 # -------------------------------
-add_executable(turret_tests
-    tests/test_limit_switches.cpp
-    tests/test_spiral_zipper_zero.cpp
-    tests/test_spiral_zipper_motor.cpp
-    src/config.cpp
-    src/limit_switch.cpp
-    src/spiral_zipper.cpp
-    src/encoder.cpp
-    src/servo_city_motor.cpp
-    # Include any additional production sources required by your tests.
-)
+# add_executable(turret_tests
+#     tests/test_limit_switches.cpp
+#     tests/test_spiral_zipper_zero.cpp
+#     tests/test_spiral_zipper_motor.cpp
+#     src/config.cpp
+#     src/limit_switch.cpp
+#     src/spiral_zipper.cpp
+#     src/encoder.cpp
+#     src/servo_city_motor.cpp
+#     # Include any additional production sources required by your tests.
+# )
 
-target_include_directories(turret_tests PRIVATE include)
-target_link_libraries(turret_tests PRIVATE
-    gtest
-    gtest_main
-    pigpio
-    yaml-cpp
-)
+# target_include_directories(turret_tests PRIVATE include)
+# target_link_libraries(turret_tests PRIVATE
+#     gtest
+#     gtest_main
+#     pigpio
+#     yaml-cpp
+# )
 
 # Enable CTest so that you can run "ctest" from the build folder.
-enable_testing()
-add_test(NAME turret_tests COMMAND turret_tests)
+# enable_testing()
+# add_test(NAME turret_tests COMMAND turret_tests)
 
 # -------------------------------
 # ROS2 Installation

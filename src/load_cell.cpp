@@ -103,7 +103,7 @@ bool LoadCell::calibrate(int numCalPoints) {
     global_b = reg.second;
 
     std::cout << "\nCalibration complete: m = " << global_m << ", b = " << global_b << std::endl;
-    return saveCalibrationData();
+    return 0;;
 }
 
 // Save calibration data to a file.

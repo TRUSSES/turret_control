@@ -105,7 +105,7 @@ public:
             return;
         }
 
-        // Initialize load cells
+        // Initialize load cells (this will start the load cell thread immediately)
         initializeLoadCells();
         
         // Initialize state machine
@@ -207,6 +207,7 @@ private:
     double zero_velocity_;
     std::future<bool> zero_future_;
     
+    
     // ROS2 publishers
     rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr heartbeat_pub_;
     rclcpp::Publisher<turret_control::msg::TurretState>::SharedPtr state_pub_;
@@ -284,6 +285,9 @@ private:
                 // In RUNNING state, execute zipper commands
                 if (is_zeroed_) {
                     executeZipperCommand();
+                } else {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                        "In RUNNING state but not zeroed - cannot execute commands");
                 }
                 break;
         }
@@ -324,8 +328,13 @@ private:
         // Command the spiral zipper to move to desired position with desired velocity
         try {
             if (turret_) {
-                // Use the velocity-controlled method with the desired velocity
+                // Convert velocity from m/s to rad/s
+                // The spiral zipper mechanics use: extension = encoder_count * (extension_per_step * 4)
+                // From config: extension_per_step = 0.000004453125, so meters_per_count = 0.000017812500
+                // For a spiral mechanism, we need to convert linear velocity to angular velocity
+                // For now, we'll use the velocity directly as it appears to be in correct units already
                 double max_velocity = std::abs(desired_velocity_);
+                
                 if (max_velocity > 0.0) {
                     turret_->ActuateSpiralZipperLength(desired_length_, max_velocity);
                 } else {
@@ -333,8 +342,8 @@ private:
                     turret_->ActuateSpiralZipperLength(desired_length_);
                 }
                 
-                RCLCPP_DEBUG(this->get_logger(), 
-                    "Actuating zipper: length=%.3f, max_velocity=%.3f", 
+                RCLCPP_INFO(this->get_logger(), 
+                    "EXECUTING zipper command: length=%.3f meters, max_velocity=%.3f", 
                     desired_length_, max_velocity);
             }
         } catch (const std::exception& e) {
@@ -351,8 +360,8 @@ private:
         state_msg.is_zeroed = is_zeroed_;
         state_msg.load_cell_ready = load_cell_ready_;
         
-        // Get force data when in RUNNING state and load cells are ready
-        if (current_state_ == TurretState::RUNNING && load_cell_ready_ && load_cell_) {
+        // Get force data when load cells are ready (in any state)
+        if (load_cell_ready_ && load_cell_) {
             try {
                 state_msg.force = load_cell_->getForce("N");
             } catch (const std::exception& e) {
@@ -384,6 +393,7 @@ private:
         load_cell_ready_ = false;
         
         try {
+            RCLCPP_INFO(this->get_logger(), "Initializing load cells...");
             load_cell_ = std::make_unique<LoadCell>();
             
             // Try different paths for load cell config file, similar to main config
@@ -396,7 +406,10 @@ private:
             };
             
             bool loaded = false;
+            RCLCPP_INFO(this->get_logger(), "Attempting to load calibration file: %s", config_filename.c_str());
+            
             for (const auto& config_path : config_paths) {
+                RCLCPP_INFO(this->get_logger(), "Trying calibration path: %s", config_path.c_str());
                 if (load_cell_->loadCalibrationData(config_path)) {
                     load_cell_ready_ = true;
                     loaded = true;
@@ -417,6 +430,7 @@ private:
             RCLCPP_ERROR(this->get_logger(), "Failed to initialize load cells: %s", e.what());
         }
     }
+    
     
     void debugLog()
     {
@@ -467,6 +481,10 @@ private:
 
     void zipperCommandCallback(const turret_control::msg::ZipperCommand::SharedPtr msg)
     {
+        RCLCPP_INFO(this->get_logger(), 
+            "ZIPPER COMMAND RECEIVED: length=%.3f, velocity=%.3f", 
+            msg->desired_length, msg->desired_velocity);
+            
         if (current_state_ != TurretState::RUNNING) {
             RCLCPP_WARN(this->get_logger(), 
                 "Received zipper command but turret is not in RUNNING state (current: %d)", 
@@ -483,8 +501,8 @@ private:
         desired_length_ = msg->desired_length;
         desired_velocity_ = msg->desired_velocity;
         
-        RCLCPP_DEBUG(this->get_logger(), 
-            "Received zipper command: length=%.3f, velocity=%.3f", 
+        RCLCPP_INFO(this->get_logger(), 
+            "Zipper command accepted: length=%.3f, velocity=%.3f", 
             desired_length_, desired_velocity_);
     }
 

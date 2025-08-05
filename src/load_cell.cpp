@@ -121,14 +121,15 @@ bool LoadCell::saveCalibrationData(const std::string& configFile) {
 
 // Load calibration data from a file.
 bool LoadCell::loadCalibrationData(const std::string& configFile) {
+    std::cout << "Attempting to load calibration from: " << configFile << std::endl;
     std::ifstream config(configFile);
     if (!config) {
-        std::cerr << "Error: Calibration config file not found." << std::endl;
+        std::cout << "Error: Calibration config file not found: " << configFile << std::endl;
         return false;
     }
     config >> global_m >> global_b;
     config.close();
-    std::cout << "Calibration data loaded: m = " << global_m << ", b = " << global_b << std::endl;
+    std::cout << "Calibration data loaded successfully: m = " << global_m << ", b = " << global_b << std::endl;
     return true;
 }
 

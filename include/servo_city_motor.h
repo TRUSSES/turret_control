@@ -1,5 +1,5 @@
-#ifndef SERVO_CITY_MOTOR_H
-#define SERVO_CITY_MOTOR_H
+#ifndef MOTOR_H
+#define MOTOR_H
 
 #include <pigpio.h>
 #include <atomic>
@@ -21,16 +21,22 @@ class ServoCityMotor {
   
   /**
    * @brief Constructs a ServoCityMotor using configuration from a YAML node.
-   * Expects keys: "servo_pwm_pin", "servo_dir_pin", "servo_enc_a", "servo_enc_b".
+   * Expects keys: "pwm", "dir", "enca", "encb", and optional "pid" section.
    */
   explicit ServoCityMotor(const YAML::Node &node);
   
   ~ServoCityMotor();
 
   void setTargetVelocity(double target_rad_per_sec);
+  double getTargetVelocity();
   double getCurrentVelocity() const;
   void update();
   void stop();
+  
+  // PID tuning methods for load optimization
+  void setPIDGains(double kp, double ki, double kd) { Kp_ = kp; Ki_ = ki; Kd_ = kd; }
+  void getPIDGains(double& kp, double& ki, double& kd) { kp = Kp_; ki = Ki_; kd = Kd_; }
+  void resetPID() { integral_ = 0.0; prev_error_ = 0.0; }
 
   /// Set the PWM output directly.
   void setMotorOutput(int pwm);
@@ -39,7 +45,7 @@ class ServoCityMotor {
   std::atomic<int> encoder_count{0};
   std::atomic<int> raw_a{0};
   std::atomic<int> raw_b{0};
-  bool debug_encoder = true;
+  bool debug_encoder = false;
 
  private:
   const int pwm_pin_;
@@ -47,18 +53,28 @@ class ServoCityMotor {
   const int enc_a_;
   const int enc_b_;
   
-  // Motor parameters
-  const double max_rpm_ = 100.0;
+  // Motor parameters (for motor with gear ratio 188:1) - ACTIVE
+  const double max_rpm_ = 50.0;  // Adjusted for 12V operation (24V rated = 100 RPM)
   const double gear_ratio_ = 188.0;
   const double counts_per_rev_ = 5281.1;
+
+  // Motor parameters (for motor with gear ratio 99.5:1) - COMMENTED OUT
+  // const double max_rpm_ = 100.0;  // Adjusted for 12V operation (24V rated = 180 RPM)
+  // const double gear_ratio_ = 99.5;
+  // const double counts_per_rev_ = 2786.2;
 
   std::atomic<double> current_velocity_{0.0};
   double target_velocity_ = 0.0;
 
-  // PID control parameters
-  const double Kp_ = 0.6;
-  const double Ki_ = 0.2;
-  const double Kd_ = 0.05;
+  // PID control parameters - tunable for wheel load conditions
+  // double Kp_ = 0.8;   // Proportional gain - increase for faster response, decrease if oscillating
+  // double Ki_ = 0.1;   // Integral gain - increase to eliminate steady-state error
+  // double Kd_ = 0.01;  // Derivative gain - increase to reduce overshoot, decrease if noisy
+
+  double Kp_ = 0.3;   // Proportional gain - increase for faster response, decrease if oscillating
+  double Ki_ = 0.15;   // Integral gain - increase to eliminate steady-state error
+  double Kd_ = 0.015;  // Derivative gain - increase to reduce overshoot, decrease if noisy
+
   double integral_ = 0.0;
   double prev_error_ = 0.0;
 
@@ -70,10 +86,13 @@ class ServoCityMotor {
   std::chrono::time_point<std::chrono::steady_clock> last_update_;
   std::chrono::time_point<std::chrono::steady_clock> last_encoder_time_;
 
-  static ServoCityMotor* instance;
+  static ServoCityMotor* instance_[4];  // Support up to 4 motors
+  static int instance_count_;
+  int instance_id_;
+  
   static void encoderISR(int gpio, int level, uint32_t tick);
   void updateEncoder(int a, int b);
   double countsToRadians(int counts) const;
 };
 
-#endif  // SERVO_CITY_MOTOR_H
+#endif // MOTOR_H

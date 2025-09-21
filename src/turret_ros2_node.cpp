@@ -106,7 +106,7 @@ public:
         }
 
         // Initialize load cells (this will start the load cell thread immediately)
-        initializeLoadCells();
+        //initializeLoadCells();
         
         // Initialize state machine
         current_state_ = TurretState::IDLE;
@@ -460,24 +460,24 @@ private:
         }
     }
     
-    void testServiceCallback(
-        const std::shared_ptr<std_srvs::srv::Empty::Request> request,
-        std::shared_ptr<std_srvs::srv::Empty::Response> response)
-    {
-        (void)request; // Unused parameter
-        (void)response; // Unused parameter
-        RCLCPP_INFO(this->get_logger(), "TEST SERVICE CALLED! Service communication is working!");
-    }
+    // void testServiceCallback(
+    //     const std::shared_ptr<std_srvs::srv::Empty::Request> request,
+    //     std::shared_ptr<std_srvs::srv::Empty::Response> response)
+    // {
+    //     (void)request; // Unused parameter
+    //     (void)response; // Unused parameter
+    //     RCLCPP_INFO(this->get_logger(), "TEST SERVICE CALLED! Service communication is working!");
+    // }
     
-    void triggerServiceCallback(
-        const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
-        std::shared_ptr<std_srvs::srv::Trigger::Response> response)
-    {
-        (void)request; // Unused parameter
-        response->success = true;
-        response->message = "Trigger service called successfully!";
-        RCLCPP_INFO(this->get_logger(), "TRIGGER SERVICE CALLED! Response: %s", response->message.c_str());
-    }
+    // void triggerServiceCallback(
+    //     const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+    //     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+    // {
+    //     (void)request; // Unused parameter
+    //     response->success = true;
+    //     response->message = "Trigger service called successfully!";
+    //     RCLCPP_INFO(this->get_logger(), "TRIGGER SERVICE CALLED! Response: %s", response->message.c_str());
+    // }
 
     void zipperCommandCallback(const turret_control::msg::ZipperCommand::SharedPtr msg)
     {

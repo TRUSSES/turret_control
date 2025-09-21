@@ -148,18 +148,18 @@ double LoadCell::getForce(const std::string& unit) {
     int sum_tared = tared1 + tared2 + tared3;
     
     // Debug: print intermediate values
-    std::cout << "[DEBUG] Tared readings: " 
-              << tared1 << ", " << tared2 << ", " << tared3 
-              << " | Sum: " << sum_tared << std::endl;
+    // std::cout << "[DEBUG] Tared readings: " 
+    //           << tared1 << ", " << tared2 << ", " << tared3 
+    //           << " | Sum: " << sum_tared << std::endl;
     
     double total_weight = global_m * sum_tared + global_b; // in grams
 
     if (unit == "N" || unit == "n") {
         double force_newtons = gramsToNewtons(total_weight);
-        std::cout << "[DEBUG] Using calibration: m = " << global_m 
-                  << ", b = " << global_b 
-                  << " | Calculated weight (g): " << total_weight 
-                  << " => Force (N): " << force_newtons << std::endl;
+        // std::cout << "[DEBUG] Using calibration: m = " << global_m 
+        //           << ", b = " << global_b 
+        //           << " | Calculated weight (g): " << total_weight 
+        //           << " => Force (N): " << force_newtons << std::endl;
         return force_newtons;
     }
     return total_weight;

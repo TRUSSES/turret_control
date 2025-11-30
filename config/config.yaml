@@ -17,6 +17,15 @@ turret_encoder:
   encoder_max_value: 1023
   offset: 0
 
+# Pitch encoder (Bourns EMS) - measures pivot angle
+# TODO: Update these pins to match your wiring
+pitch_encoder:
+  cs_pin: 0
+  clk_pin: 0
+  do_pin: 0
+  encoder_max_value: 1023
+  offset: 0
+
 turret_limit_switch:
   limit_switch_pin: 14
   debounce_threshold_ms: 30
@@ -26,6 +35,10 @@ pitch_motor:
 
 yaw_motor:
   motor_id: 11
+
+# Spool motor via Pi3Hat CAN (JC5)
+spool_motor:
+  motor_id: 10
 
 socket: 0
 

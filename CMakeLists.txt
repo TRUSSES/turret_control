@@ -57,6 +57,8 @@ add_executable(turret_ros2_node
     src/encoder.cpp
     src/limit_switch.cpp
     src/cubemars_control.cpp
+    src/cubemars_pi3hat.cpp
+    src/pi3hat.cpp
     src/config.cpp
     src/hx711.cpp
     src/e_stop.cpp
@@ -96,6 +98,8 @@ add_executable(turret_legacy
     src/encoder.cpp
     src/limit_switch.cpp
     src/cubemars_control.cpp
+    src/cubemars_pi3hat.cpp
+    src/pi3hat.cpp
     src/config.cpp
     src/hx711.cpp
     src/e_stop.cpp

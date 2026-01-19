@@ -23,7 +23,7 @@ float CubemarsPi3Hat::uint_to_float(int x_int, float x_min, float x_max, int bit
 
 void CubemarsPi3Hat::sendCommandMITMode(float pos, float vel, float kp, float kd, float torq) {
     if (vel != 0.0) {
-        std::cout << "Motor ID " << motor_id_ << " sendCommand: vel=" << vel << " rad/s" << std::endl;
+        //std::cout << "Motor ID " << motor_id_ << " sendCommand: vel=" << vel << " rad/s" << std::endl;
     }
     float p_des  = std::clamp(pos,  P_MIN, P_MAX);
     float v_des  = std::clamp(vel,  V_MIN, V_MAX);

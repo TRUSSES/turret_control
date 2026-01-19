@@ -38,7 +38,7 @@ yaw_motor:
 
 # Spool motor via Pi3Hat CAN (JC5)
 spool_motor:
-  motor_id: 10
+  motor_id: 13
 
 socket: 0
 

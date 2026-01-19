@@ -72,7 +72,7 @@ class ServoCityMotor {
   // double Kd_ = 0.01;  // Derivative gain - increase to reduce overshoot, decrease if noisy
 
   double Kp_ = 0.3;   // Proportional gain - increase for faster response, decrease if oscillating
-  double Ki_ = 0.15;   // Integral gain - increase to eliminate steady-state error
+  double Ki_ = 0.0;   // Integral gain - increase to eliminate steady-state error
   double Kd_ = 0.015;  // Derivative gain - increase to reduce overshoot, decrease if noisy
 
   double integral_ = 0.0;

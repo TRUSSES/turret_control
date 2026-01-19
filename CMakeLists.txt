@@ -30,6 +30,7 @@ find_package(yaml-cpp REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TurretState.msg"
   "msg/ZipperCommand.msg"
+  "msg/TurretTeleopCommand.msg"
   "srv/ZeroTurret.srv"
   "srv/SetState.srv"
   DEPENDENCIES std_msgs geometry_msgs
@@ -75,9 +76,10 @@ ament_target_dependencies(turret_ros2_node
   std_srvs
 )
 
-target_link_libraries(turret_ros2_node 
-  pigpio 
+target_link_libraries(turret_ros2_node
+  pigpio
   yaml-cpp
+  bcm_host
 )
 
 # Link generated interfaces
@@ -106,7 +108,7 @@ add_executable(turret_legacy
     src/load_cell.cpp
 )
 target_include_directories(turret_legacy PRIVATE include)
-target_link_libraries(turret_legacy PRIVATE pigpio yaml-cpp)
+target_link_libraries(turret_legacy PRIVATE pigpio yaml-cpp bcm_host)
 
 # -------------------------------
 # Calibration executable

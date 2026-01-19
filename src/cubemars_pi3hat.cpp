@@ -22,6 +22,9 @@ float CubemarsPi3Hat::uint_to_float(int x_int, float x_min, float x_max, int bit
 }
 
 void CubemarsPi3Hat::sendCommandMITMode(float pos, float vel, float kp, float kd, float torq) {
+    if (vel != 0.0) {
+        std::cout << "Motor ID " << motor_id_ << " sendCommand: vel=" << vel << " rad/s" << std::endl;
+    }
     float p_des  = std::clamp(pos,  P_MIN, P_MAX);
     float v_des  = std::clamp(vel,  V_MIN, V_MAX);
     float kp_des = std::clamp(kp,   KP_MIN, KP_MAX);
@@ -36,7 +39,7 @@ void CubemarsPi3Hat::sendCommandMITMode(float pos, float vel, float kp, float kd
 
     mjbots::pi3hat::CanFrame &frame = tx_can_[can_bus_];
     frame.id = motor_id_;
-    frame.bus = 5;  // JC5
+    frame.bus = 5;  // JC5 (Pi3Hat uses bus index 5 for CAN4)
     frame.size = 8;
     frame.expect_reply = true;
     frame.data[0] = static_cast<uint8_t>(con_pos >> 8);
@@ -64,9 +67,10 @@ void CubemarsPi3Hat::sendCommandMITMode(float pos, float vel, float kp, float kd
 }
 
 void CubemarsPi3Hat::enterMITMode() {
+    std::cout << "CubemarsPi3Hat::enterMITMode() - Motor ID: " << motor_id_ << std::endl;
     mjbots::pi3hat::CanFrame &frame = tx_can_[can_bus_];
     frame.id = motor_id_;
-    frame.bus = 5;
+    frame.bus = 5;  // JC5 (Pi3Hat uses bus index 5 for CAN4)
     frame.size = 8;
     for (int i = 0; i < 7; i++) {
         frame.data[i] = 0xFF;
@@ -81,12 +85,13 @@ void CubemarsPi3Hat::enterMITMode() {
     input.timeout_ns = 1200000;
 
     pi3hat_->Cycle(input);
+    std::cout << "CubemarsPi3Hat::enterMITMode() - DONE for Motor ID: " << motor_id_ << std::endl;
 }
 
 void CubemarsPi3Hat::exitMITMode() {
     mjbots::pi3hat::CanFrame &frame = tx_can_[can_bus_];
     frame.id = motor_id_;
-    frame.bus = 5;
+    frame.bus = 5;  // JC5 (Pi3Hat uses bus index 5 for CAN4)
     frame.size = 8;
     for (int i = 0; i < 7; i++) {
         frame.data[i] = 0xFF;

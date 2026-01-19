@@ -10,21 +10,6 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    # Load GPS config
-    config_directory = os.path.join( 
-        get_package_share_directory('ublox_gps'), 
-        'config' 
-    ) 
-    params = os.path.join(config_directory, 'zed_f9p.yaml') 
- 
-    # GPS node 
-    ublox_gps_node_spirit = Node( 
-         package='ublox_gps', 
-         executable='ublox_gps_node', 
-         name='ublox_gps_node_spirit', 
-         output='both', 
-         parameters=[params], 
-    ) 
 
     # Rover base node
     turret_node = Node(
@@ -42,7 +27,6 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        ublox_gps_node_spirit,  # Commented out for now
         turret_node,
         shutdown_on_exit,
     ])

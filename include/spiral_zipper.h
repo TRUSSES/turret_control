@@ -58,6 +58,9 @@ public:
   // In spiral_zipper.h, inside the SpiralZipper class public section
   double GetMotorVelocity() const { return servo_motor_.getCurrentVelocity(); }
 
+  // Direct velocity control for teleop mode
+  void SetMotorVelocity(double velocity) { servo_motor_.setTargetVelocity(velocity); }
+
 private:
   // Use the new ServoCityMotor object (which implements sign-magnitude control).
   ServoCityMotor servo_motor_;

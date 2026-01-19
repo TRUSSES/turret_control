@@ -4,6 +4,7 @@
 #include <std_srvs/srv/trigger.hpp>
 #include "turret_control/msg/turret_state.hpp"
 #include "turret_control/msg/zipper_command.hpp"
+#include "turret_control/msg/turret_teleop_command.hpp"
 #include "turret_control/srv/zero_turret.hpp"
 #include "turret_control/srv/set_state.hpp"
 #include "turret.h"
@@ -129,7 +130,11 @@ public:
         zipper_cmd_sub_ = this->create_subscription<turret_control::msg::ZipperCommand>(
             topic_prefix_ + "/zipper_command", 10,
             std::bind(&TurretROS2Node::zipperCommandCallback, this, std::placeholders::_1));
-        
+
+        teleop_cmd_sub_ = this->create_subscription<turret_control::msg::TurretTeleopCommand>(
+            topic_prefix_ + "/teleop_command", 10,
+            std::bind(&TurretROS2Node::teleopCommandCallback, this, std::placeholders::_1));
+
         // Services
         try {
             zero_service_ = this->create_service<turret_control::srv::ZeroTurret>(
@@ -185,7 +190,8 @@ private:
     enum class TurretState : uint8_t {
         IDLE = 0,
         READY = 1,
-        RUNNING = 2
+        RUNNING = 2,
+        TELEOP = 3
     };
 
     // Core components
@@ -214,7 +220,13 @@ private:
     
     // ROS2 subscribers
     rclcpp::Subscription<turret_control::msg::ZipperCommand>::SharedPtr zipper_cmd_sub_;
-    
+    rclcpp::Subscription<turret_control::msg::TurretTeleopCommand>::SharedPtr teleop_cmd_sub_;
+
+    // Teleop command variables
+    double teleop_sz_velocity_ = 0.0;
+    double teleop_pitch_velocity_ = 0.0;
+    double teleop_yaw_velocity_ = 0.0;
+
     // ROS2 services
     rclcpp::Service<turret_control::srv::ZeroTurret>::SharedPtr zero_service_;
     rclcpp::Service<turret_control::srv::SetState>::SharedPtr set_state_service_;
@@ -290,6 +302,11 @@ private:
                         "In RUNNING state but not zeroed - cannot execute commands");
                 }
                 break;
+
+            case TurretState::TELEOP:
+                // In TELEOP state, execute direct velocity commands (no zeroing required)
+                executeTeleopCommand();
+                break;
         }
     }
     
@@ -334,20 +351,34 @@ private:
                 // For a spiral mechanism, we need to convert linear velocity to angular velocity
                 // For now, we'll use the velocity directly as it appears to be in correct units already
                 double max_velocity = std::abs(desired_velocity_);
-                
+
                 if (max_velocity > 0.0) {
                     turret_->ActuateSpiralZipperLength(desired_length_, max_velocity);
                 } else {
                     // Fallback to position-only control if no velocity specified
                     turret_->ActuateSpiralZipperLength(desired_length_);
                 }
-                
-                RCLCPP_INFO(this->get_logger(), 
-                    "EXECUTING zipper command: length=%.3f meters, max_velocity=%.3f", 
+
+                RCLCPP_INFO(this->get_logger(),
+                    "EXECUTING zipper command: length=%.3f meters, max_velocity=%.3f",
                     desired_length_, max_velocity);
             }
         } catch (const std::exception& e) {
             RCLCPP_ERROR(this->get_logger(), "Error executing zipper command: %s", e.what());
+        }
+    }
+
+    void executeTeleopCommand()
+    {
+        // Command motors directly with velocity commands
+        try {
+            if (turret_) {
+                turret_->SetSpiralZipperVelocity(teleop_sz_velocity_);
+                turret_->SetPitchVelocity(teleop_pitch_velocity_);
+                turret_->SetYawVelocity(teleop_yaw_velocity_);
+            }
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "Error executing teleop command: %s", e.what());
         }
     }
 
@@ -382,6 +413,9 @@ private:
                 break;
             case TurretState::RUNNING:
                 state_msg.status_message = "Turret is RUNNING";
+                break;
+            case TurretState::TELEOP:
+                state_msg.status_message = "Turret is in TELEOP mode";
                 break;
         }
         
@@ -481,29 +515,48 @@ private:
 
     void zipperCommandCallback(const turret_control::msg::ZipperCommand::SharedPtr msg)
     {
-        RCLCPP_INFO(this->get_logger(), 
-            "ZIPPER COMMAND RECEIVED: length=%.3f, velocity=%.3f", 
+        RCLCPP_INFO(this->get_logger(),
+            "ZIPPER COMMAND RECEIVED: length=%.3f, velocity=%.3f",
             msg->desired_length, msg->desired_velocity);
-            
+
         if (current_state_ != TurretState::RUNNING) {
-            RCLCPP_WARN(this->get_logger(), 
-                "Received zipper command but turret is not in RUNNING state (current: %d)", 
+            RCLCPP_WARN(this->get_logger(),
+                "Received zipper command but turret is not in RUNNING state (current: %d)",
                 static_cast<int>(current_state_));
             return;
         }
-        
+
         if (!is_zeroed_) {
-            RCLCPP_WARN(this->get_logger(), 
+            RCLCPP_WARN(this->get_logger(),
                 "Received zipper command but turret is not zeroed");
             return;
         }
-        
+
         desired_length_ = msg->desired_length;
         desired_velocity_ = msg->desired_velocity;
-        
-        RCLCPP_INFO(this->get_logger(), 
-            "Zipper command accepted: length=%.3f, velocity=%.3f", 
+
+        RCLCPP_INFO(this->get_logger(),
+            "Zipper command accepted: length=%.3f, velocity=%.3f",
             desired_length_, desired_velocity_);
+    }
+
+    void teleopCommandCallback(const turret_control::msg::TurretTeleopCommand::SharedPtr msg)
+    {
+        if (current_state_ != TurretState::TELEOP) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "Received teleop command but turret is not in TELEOP state (current: %d)",
+                static_cast<int>(current_state_));
+            return;
+        }
+
+        // TELEOP mode: Accept velocity commands without zeroing requirement
+        teleop_sz_velocity_ = msg->spiral_zipper_velocity;
+        teleop_pitch_velocity_ = msg->pitch_velocity;
+        teleop_yaw_velocity_ = msg->yaw_velocity;
+
+        RCLCPP_DEBUG(this->get_logger(),
+            "Teleop command: sz_vel=%.3f, pitch_vel=%.3f, yaw_vel=%.3f",
+            teleop_sz_velocity_, teleop_pitch_velocity_, teleop_yaw_velocity_);
     }
 
     void zeroTurretCallback(
@@ -566,9 +619,16 @@ private:
         std::shared_ptr<turret_control::srv::SetState::Response> response)
     {
         auto requested_state = static_cast<TurretState>(request->desired_state);
-        
+
         response->current_state = static_cast<uint8_t>(current_state_);
-        
+
+        // If leaving TELEOP state, exit MIT mode for motors
+        if (current_state_ == TurretState::TELEOP && requested_state != TurretState::TELEOP) {
+            if (turret_) {
+                turret_->ExitTeleopMode();
+            }
+        }
+
         // State transition logic
         switch (requested_state) {
             case TurretState::IDLE:
@@ -602,7 +662,22 @@ private:
                     response->message = "State changed to RUNNING";
                 }
                 break;
-                
+
+            case TurretState::TELEOP:
+                // TELEOP mode allows direct velocity control without zeroing requirement
+                // Enter MIT mode for pitch and yaw motors
+                if (turret_) {
+                    turret_->EnterTeleopMode();
+                }
+                // Reset teleop velocities to zero when entering TELEOP state
+                teleop_sz_velocity_ = 0.0;
+                teleop_pitch_velocity_ = 0.0;
+                teleop_yaw_velocity_ = 0.0;
+                current_state_ = TurretState::TELEOP;
+                response->success = true;
+                response->message = "State changed to TELEOP (direct motor control)";
+                break;
+
             default:
                 response->success = false;
                 response->message = "Invalid state requested";

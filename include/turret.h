@@ -1,7 +1,6 @@
 #ifndef TURRET_H_
 #define TURRET_H_
 
-#include "cubemars_control.h"
 #include "cubemars_pi3hat.h"
 #include "encoder.h"
 #include "limit_switch.h"
@@ -78,18 +77,26 @@ class Turret {
   // Combined spiral zipper + spool control
   void ActuateCoupledExtension(float goal_dist, float desired_pitch_deg);
 
+  // Direct velocity control methods for teleop mode
+  void EnterTeleopMode();
+  void ExitTeleopMode();
+  void SetSpiralZipperVelocity(double velocity);
+  void SetPitchVelocity(double velocity);
+  void SetYawVelocity(double velocity);
+  void StopAllMotors();
+
  private:
-  // Pi3Hat for spool motor
+  // Pi3Hat for all Cubemars motors (pitch, yaw, spool)
   std::unique_ptr<mjbots::pi3hat::Pi3Hat> pi3hat_;
 
   Encoder turret_encoder_;
   Encoder pitch_encoder_;  // Bourns EMS encoder for pitch angle
   LimitSwitch turret_limit_switch_;
-  CubemarsControl pitch_motor_;
-  CubemarsControl yaw_motor_;
   SpiralZipper spiral_zipper_;
 
-  // Spool motor via Pi3Hat
+  // Cubemars motors via Pi3Hat
+  std::unique_ptr<CubemarsPi3Hat> pitch_motor_;
+  std::unique_ptr<CubemarsPi3Hat> yaw_motor_;
   std::unique_ptr<CubemarsPi3Hat> spool_motor_;
   SpoolTracker spool_tracker_;
 

@@ -85,6 +85,18 @@ class Turret {
   void SetYawVelocity(double velocity);
   void StopAllMotors();
 
+  // Zeroing methods for teleop zero mode
+  void ZeroPitchEncoder();          // Reset pitch encoder when limit switch pressed
+  void ZeroYawMotor();              // Send zero command to yaw motor
+  bool IsSpiralZipperLimitPressed() const;  // Check if SZ limit switch is pressed
+  bool IsPitchLimitPressed() const;         // Check if pitch limit switch is pressed
+
+  // Position feedback methods
+  double GetYawAngle() const;       // Get yaw position from motor feedback (radians)
+  double GetPitchMotorPosition() const;  // Get pitch motor position (radians)
+  double GetYawMotorVelocity() const;    // Get yaw motor velocity (rad/s)
+  double GetPitchMotorVelocity() const;  // Get pitch motor velocity (rad/s)
+
  private:
   // Pi3Hat for all Cubemars motors (pitch, yaw, spool)
   std::unique_ptr<mjbots::pi3hat::Pi3Hat> pi3hat_;
@@ -92,6 +104,7 @@ class Turret {
   Encoder turret_encoder_;
   Encoder pitch_encoder_;  // Bourns EMS encoder for pitch angle
   LimitSwitch turret_limit_switch_;
+  std::unique_ptr<LimitSwitch> pitch_limit_switch_;  // Limit switch for pitch zeroing
   SpiralZipper spiral_zipper_;
 
   // Cubemars motors via Pi3Hat

@@ -29,9 +29,10 @@ Turret::Turret(int socket, float x_offset, float y_offset)
 
     // Initialize motors via Pi3Hat (motor_id, can_bus, pi3hat_ptr)
     pitch_motor_ = std::make_unique<CubemarsPi3Hat>(10, 0, pi3hat_.get());
-    // yaw_motor_ = std::make_unique<CubemarsPi3Hat>(0xB, 0, pi3hat_.get());
+    yaw_motor_ = std::make_unique<CubemarsPi3Hat>(0xB, 0, pi3hat_.get());
     // spool_motor_ = std::make_unique<CubemarsPi3Hat>(10, 0, pi3hat_.get());
     std::cout << "DEBUG: Pitch motor initialized with ID 0xA" << std::endl;
+    std::cout << "DEBUG: Yaw motor initialized with ID 0xB" << std::endl;
 }
 
 Turret::Turret(const YAML::Node &node)
@@ -43,6 +44,12 @@ Turret::Turret(const YAML::Node &node)
       y_offset_(node["y_offset"].as<float>()),
       prev_turret_angle_(0.0),
       last_turret_time_(std::chrono::steady_clock::now()) {
+
+    // Initialize pitch limit switch if configured
+    if (node["pitch_limit_switch"]) {
+        pitch_limit_switch_ = std::make_unique<LimitSwitch>(node["pitch_limit_switch"]);
+        std::cout << "DEBUG: Pitch limit switch initialized" << std::endl;
+    }
 
     // Initialize Pi3Hat for all Cubemars motors
     mjbots::pi3hat::Pi3Hat::Configuration pi3hat_config;
@@ -58,22 +65,23 @@ Turret::Turret(const YAML::Node &node)
 
     // Initialize motors via Pi3Hat from config (motor_id, can_bus, pi3hat_ptr)
     int pitch_motor_id = node["pitch_motor"]["motor_id"] ? node["pitch_motor"]["motor_id"].as<int>() : 10;
-    // int yaw_motor_id = node["yaw_motor"]["motor_id"] ? node["yaw_motor"]["motor_id"].as<int>() : 11;
+    int yaw_motor_id = node["yaw_motor"]["motor_id"] ? node["yaw_motor"]["motor_id"].as<int>() : 11;
     // int spool_motor_id = node["spool_motor"]["motor_id"] ? node["spool_motor"]["motor_id"].as<int>() : 10;
 
-    pitch_motor_ = std::make_unique<CubemarsPi3Hat>(10, 0, pi3hat_.get());
-    // yaw_motor_ = std::make_unique<CubemarsPi3Hat>(yaw_motor_id, 0, pi3hat_.get());
+    pitch_motor_ = std::make_unique<CubemarsPi3Hat>(pitch_motor_id, 0, pi3hat_.get());
+    yaw_motor_ = std::make_unique<CubemarsPi3Hat>(yaw_motor_id, 0, pi3hat_.get());
     // spool_motor_ = std::make_unique<CubemarsPi3Hat>(spool_motor_id, 0, pi3hat_.get());
     std::cout << "DEBUG: Pitch motor initialized with ID " << pitch_motor_id << std::endl;
+    std::cout << "DEBUG: Yaw motor initialized with ID " << yaw_motor_id << std::endl;
 }
 
 Turret::~Turret() {
   if (pitch_motor_) {
     pitch_motor_->exitMITMode();
   }
-  // if (yaw_motor_) {
-  //   yaw_motor_->exitMITMode();
-  // }
+  if (yaw_motor_) {
+    yaw_motor_->exitMITMode();
+  }
   // if (spool_motor_) {
   //   spool_motor_->exitMITMode();
   // }
@@ -293,25 +301,17 @@ void Turret::ActuateCoupledExtension(float goal_dist, float desired_pitch_deg) {
 
 // Direct velocity control methods for teleop mode
 void Turret::EnterTeleopMode() {
-
-  pitch_motor_->enterMITMode();
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  // Enter MIT mode for pitch and yaw motors to enable velocity control (same as spool motor Init)
-  // std::cout << "DEBUG: EnterTeleopMode called" << std::endl;
-  // if (pitch_motor_) {
-  //   std::cout << "DEBUG: pitch_motor_ pointer is valid, calling enterMITMode()" << std::endl;
-  //   pitch_motor_->enterMITMode();
-  //   std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  //   std::cout << "DEBUG: Pitch motor entered MIT mode for teleop" << std::endl;
-  // } else {
-  //   std::cout << "ERROR: pitch_motor_ pointer is NULL!" << std::endl;
-  // }
-  // if (yaw_motor_) {
-  //   yaw_motor_->enterMITMode();
-  //   std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  //   std::cout << "Yaw motor entered MIT mode for teleop" << std::endl;
-  // }
-  // // Spool motor should already be in MIT mode if being used
+  // Enter MIT mode for pitch and yaw motors to enable velocity control
+  if (pitch_motor_) {
+    pitch_motor_->enterMITMode();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::cout << "DEBUG: Pitch motor entered MIT mode for teleop" << std::endl;
+  }
+  if (yaw_motor_) {
+    yaw_motor_->enterMITMode();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::cout << "DEBUG: Yaw motor entered MIT mode for teleop" << std::endl;
+  }
   // if (spool_motor_) {
   //   spool_motor_->enterMITMode();
   //   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -325,9 +325,9 @@ void Turret::ExitTeleopMode() {
   if (pitch_motor_) {
     pitch_motor_->exitMITMode();
   }
-  // if (yaw_motor_) {
-  //   yaw_motor_->exitMITMode();
-  // }
+  if (yaw_motor_) {
+    yaw_motor_->exitMITMode();
+  }
   // if (spool_motor_) {
   //   spool_motor_->exitMITMode();
   // }
@@ -359,8 +359,10 @@ void Turret::SetYawVelocity(double velocity) {
   // velocity is in rad/s (no conversion needed, same as Pi3Hat motors)
   // MIT mode: position, velocity, Kp, Kd, torque
   // Setting position=0, Kp=0 makes it pure velocity control
-  // yaw_motor_->sendCommandMITMode(0.0, velocity, 0.0, 0.2, 0.0);
-  // COMMENTED OUT FOR TESTING - testing only pitch motor
+  if (yaw_motor_) {
+    yaw_motor_->sendCommandMITMode(0.0, velocity, 0.0, 0.3, 0.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
 }
 
 void Turret::StopAllMotors() {
@@ -373,12 +375,77 @@ void Turret::StopAllMotors() {
   }
 
   // Stop yaw motor
-  // if (yaw_motor_) {
-  //   yaw_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
-  // }
+  if (yaw_motor_) {
+    yaw_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
+  }
 
   // Stop spool motor if it exists
   // if (spool_motor_) {
   //   spool_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
   // }
+}
+
+// Zeroing methods for teleop zero mode
+void Turret::ZeroPitchEncoder() {
+  // Reset pitch encoder count to zero (called when pitch limit switch is pressed)
+  pitch_encoder_.ResetCount();
+  std::cout << "DEBUG: Pitch encoder zeroed" << std::endl;
+}
+
+void Turret::ZeroYawMotor() {
+  // Send zero command to yaw motor to set current position as zero
+  if (yaw_motor_) {
+    yaw_motor_->zeroMotor();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::cout << "DEBUG: Yaw motor zeroed" << std::endl;
+  }
+}
+
+bool Turret::IsSpiralZipperLimitPressed() const {
+  // The spiral zipper has its own limit switch - delegate to it
+  // Access via the spiral_zipper's internal limit switch
+  // We need to expose this - for now return false as placeholder
+  // The SZ zeroing is handled internally by spiral_zipper_.Zero()
+  return false;  // TODO: Expose spiral zipper limit switch state if needed
+}
+
+bool Turret::IsPitchLimitPressed() const {
+  // Check if pitch limit switch is pressed
+  if (pitch_limit_switch_) {
+    return pitch_limit_switch_->IsPressed();
+  }
+  return false;
+}
+
+// Position feedback methods
+double Turret::GetYawAngle() const {
+  // Get yaw position from motor feedback (in radians)
+  if (yaw_motor_) {
+    return static_cast<double>(yaw_motor_->getPosition());
+  }
+  return 0.0;
+}
+
+double Turret::GetPitchMotorPosition() const {
+  // Get pitch motor position from feedback (in radians)
+  if (pitch_motor_) {
+    return static_cast<double>(pitch_motor_->getPosition());
+  }
+  return 0.0;
+}
+
+double Turret::GetYawMotorVelocity() const {
+  // Get yaw motor velocity from feedback (in rad/s)
+  if (yaw_motor_) {
+    return static_cast<double>(yaw_motor_->getVelocity());
+  }
+  return 0.0;
+}
+
+double Turret::GetPitchMotorVelocity() const {
+  // Get pitch motor velocity from feedback (in rad/s)
+  if (pitch_motor_) {
+    return static_cast<double>(pitch_motor_->getVelocity());
+  }
+  return 0.0;
 }

@@ -30,6 +30,12 @@ turret_limit_switch:
   limit_switch_pin: 14
   debounce_threshold_ms: 30
 
+# Pitch limit switch - for zeroing pitch encoder
+# TODO: Update this pin to match your wiring
+pitch_limit_switch:
+  limit_switch_pin: 26
+  debounce_threshold_ms: 30
+
 pitch_motor:
   motor_id: 10
 

@@ -31,6 +31,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TurretState.msg"
   "msg/ZipperCommand.msg"
   "msg/TurretTeleopCommand.msg"
+  "msg/TurretVelocities.msg"
   "srv/ZeroTurret.srv"
   "srv/SetState.srv"
   DEPENDENCIES std_msgs geometry_msgs

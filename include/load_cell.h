@@ -8,6 +8,10 @@
 
 class LoadCell {
 public:
+    // Static method to reset GPIO pins before initializing HX711 hardware
+    // Call this before creating LoadCell object to ensure clean state
+    static void ResetGPIOPins();
+
     // Constructor: initializes HX711 objects using default GPIO pins and gain.
     LoadCell();
     ~LoadCell();

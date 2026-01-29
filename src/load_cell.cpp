@@ -4,6 +4,43 @@
 #include <thread>
 #include <chrono>
 #include <stdexcept>
+#include <pigpio.h>
+
+// Static method to reset GPIO pins before initializing HX711 hardware
+void LoadCell::ResetGPIOPins() {
+    // HX711 GPIO pins used:
+    // HX1: DOUT=22, PD_SCK=27
+    // HX2: DOUT=24, PD_SCK=27 (shared)
+    // HX3: DOUT=25, PD_SCK=27 (shared)
+
+    std::cout << "LoadCell: Resetting GPIO pins for HX711..." << std::endl;
+
+    // Set all pins to input mode to release them
+    gpioSetMode(22, PI_INPUT);
+    gpioSetMode(24, PI_INPUT);
+    gpioSetMode(25, PI_INPUT);
+    gpioSetMode(27, PI_INPUT);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Now set PD_SCK as output and cycle it to reset HX711 chips
+    gpioSetMode(27, PI_OUTPUT);
+
+    // Pull PD_SCK high for a bit (power down state)
+    gpioWrite(27, 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Pull PD_SCK low (power up and reset)
+    gpioWrite(27, 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Set DOUT pins as inputs (HX711 drives them)
+    gpioSetMode(22, PI_INPUT);
+    gpioSetMode(24, PI_INPUT);
+    gpioSetMode(25, PI_INPUT);
+
+    std::cout << "LoadCell: GPIO pins reset complete" << std::endl;
+}
 
 // Constructor: initialize HX711 objects with your default wiring.
 LoadCell::LoadCell()

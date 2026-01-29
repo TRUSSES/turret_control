@@ -157,7 +157,12 @@ public:
                 topic_prefix_ + "/zero_yaw",
                 std::bind(&TurretROS2Node::zeroYawCallback, this, std::placeholders::_1, std::placeholders::_2));
             RCLCPP_INFO(this->get_logger(), "Zero yaw service created: /%s/zero_yaw", topic_prefix_.c_str());
-            
+
+            stop_load_cells_service_ = this->create_service<std_srvs::srv::Trigger>(
+                topic_prefix_ + "/stop_load_cells",
+                std::bind(&TurretROS2Node::stopLoadCellsCallback, this, std::placeholders::_1, std::placeholders::_2));
+            RCLCPP_INFO(this->get_logger(), "Stop load cells service created: /%s/stop_load_cells", topic_prefix_.c_str());
+
             // Test services (uncomment if needed for debugging)
             // test_service_ = this->create_service<std_srvs::srv::Empty>(
             //     topic_prefix_ + "/test",
@@ -211,7 +216,21 @@ public:
     {
         RCLCPP_INFO(this->get_logger(), "Shutting down turret node - cleaning up resources...");
 
-        // Step 1: Stop load cell thread first
+        // Cleanup load cells
+        cleanupLoadCells();
+
+        // Terminate GPIO last
+        RCLCPP_INFO(this->get_logger(), "Terminating pigpio...");
+        gpioTerminate();
+        RCLCPP_INFO(this->get_logger(), "Turret node shutdown complete");
+    }
+
+    // Public method to cleanup load cells (called by signal handler or service)
+    void cleanupLoadCells()
+    {
+        RCLCPP_INFO(this->get_logger(), "Cleaning up load cells...");
+
+        // Step 1: Stop the thread
         if (load_cell_thread_running_) {
             RCLCPP_INFO(this->get_logger(), "Stopping load cell thread...");
             load_cell_thread_running_ = false;
@@ -221,17 +240,13 @@ public:
             RCLCPP_INFO(this->get_logger(), "Load cell thread stopped");
         }
 
-        // Step 2: Explicitly destroy load cell object (powers down HX711 chips)
+        // Step 2: Power down and destroy load cell object
         if (load_cell_) {
-            RCLCPP_INFO(this->get_logger(), "Destroying load cell object (powering down HX711 chips)...");
-            load_cell_.reset();  // Calls LoadCell destructor which powers down chips
+            RCLCPP_INFO(this->get_logger(), "Powering down HX711 chips...");
+            load_cell_.reset();  // Calls LoadCell destructor → HX711 power_down()
             RCLCPP_INFO(this->get_logger(), "Load cell hardware powered down");
+            load_cell_ready_ = false;
         }
-
-        // Step 3: Terminate GPIO last
-        RCLCPP_INFO(this->get_logger(), "Terminating pigpio...");
-        gpioTerminate();
-        RCLCPP_INFO(this->get_logger(), "Turret node shutdown complete");
     }
 
 private:
@@ -289,6 +304,7 @@ private:
     rclcpp::Service<turret_control::srv::ZeroTurret>::SharedPtr zero_service_;
     rclcpp::Service<turret_control::srv::SetState>::SharedPtr set_state_service_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr zero_yaw_service_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stop_load_cells_service_;
     rclcpp::Service<std_srvs::srv::Empty>::SharedPtr test_service_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr trigger_service_;
     
@@ -585,6 +601,16 @@ private:
         load_cell_ready_ = false;
 
         try {
+            // CRITICAL: Reset GPIO pins before creating LoadCell
+            // This ensures pins are in a clean state even after previous node crash
+            RCLCPP_INFO(this->get_logger(), "Resetting HX711 GPIO pins to clean state...");
+            LoadCell::ResetGPIOPins();
+            RCLCPP_INFO(this->get_logger(), "GPIO pins reset complete");
+
+            // Additional delay after GPIO reset for HX711 chips to stabilize
+            RCLCPP_INFO(this->get_logger(), "Waiting 2 more seconds after GPIO reset...");
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+
             RCLCPP_INFO(this->get_logger(), "Creating LoadCell object (initializing HX711 hardware)...");
             load_cell_ = std::make_unique<LoadCell>();
             RCLCPP_INFO(this->get_logger(), "LoadCell hardware initialized successfully!");
@@ -1001,28 +1027,68 @@ private:
             RCLCPP_ERROR(this->get_logger(), "Zero yaw failed: %s", e.what());
         }
     }
+
+    void stopLoadCellsCallback(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+    {
+        (void)request;  // Unused
+
+        try {
+            cleanupLoadCells();
+            response->success = true;
+            response->message = "Load cells stopped and powered down successfully";
+            RCLCPP_INFO(this->get_logger(), "Load cells stopped via service");
+        } catch (const std::exception& e) {
+            response->success = false;
+            response->message = std::string("Failed to stop load cells: ") + e.what();
+            RCLCPP_ERROR(this->get_logger(), "Failed to stop load cells: %s", e.what());
+        }
+    }
 };
+
+// Global node pointer for signal handler
+std::shared_ptr<TurretROS2Node> g_node;
 
 // Signal handler for graceful shutdown
 void signalHandler(int signum) {
-    std::cout << "\nInterrupt signal (" << signum << ") received. Initiating graceful shutdown..." << std::endl;
+    std::cout << "\n\n========================================" << std::endl;
+    std::cout << "Interrupt signal (" << signum << ") received." << std::endl;
+    std::cout << "Initiating graceful shutdown..." << std::endl;
+    std::cout << "========================================\n" << std::endl;
+
+    // Cleanup load cells BEFORE rclcpp::shutdown()
+    if (g_node) {
+        try {
+            std::cout << "Cleaning up load cells before shutdown..." << std::endl;
+            g_node->cleanupLoadCells();
+            std::cout << "Load cells cleaned up successfully" << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Error during load cell cleanup: " << e.what() << std::endl;
+        }
+    }
+
+    // Now shutdown ROS
     rclcpp::shutdown();
 }
 
 int main(int argc, char * argv[])
 {
-    // Register signal handler for graceful shutdown
-    signal(SIGINT, signalHandler);
-    signal(SIGTERM, signalHandler);
-
     rclcpp::init(argc, argv);
 
     std::shared_ptr<TurretROS2Node> node;
 
     try {
         node = std::make_shared<TurretROS2Node>();
+        g_node = node;  // Set global pointer for signal handler
+
+        // Register signal handlers AFTER node creation (pigpio has installed its handlers)
+        // We override them here
+        signal(SIGINT, signalHandler);
+        signal(SIGTERM, signalHandler);
 
         RCLCPP_INFO(node->get_logger(), "Turret control node created successfully");
+        RCLCPP_INFO(node->get_logger(), "Signal handlers registered for graceful shutdown");
         RCLCPP_INFO(node->get_logger(), "Starting to spin - ready to process callbacks...");
 
         // Try SingleThreadedExecutor first to isolate threading issues

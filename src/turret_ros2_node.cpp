@@ -506,6 +506,14 @@ private:
             // Monitor spiral zipper limit switch for zeroing
             // The SZ zeroing is detected when extension is near zero after retracting
             // For now, we check if extension is very small (near limit)
+
+            // DEBUG: Log SZ zeroing conditions every 2 seconds
+            if (!sz_zeroed_) {
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "TELEOP_ZERO: SZ zeroing - extension=%.4f, sz_vel=%.3f",
+                    current_extension_, teleop_sz_velocity_);
+            }
+
             if (!sz_zeroed_ && current_extension_ < 0.001 && teleop_sz_velocity_ < 0) {
                 // SZ has been retracted to limit - zero the encoder
                 turret_->ZeroSpiralZipper();  // This will reset the encoder
@@ -514,7 +522,16 @@ private:
             }
 
             // Monitor pitch limit switch for zeroing
-            if (!pitch_zeroed_ && turret_->IsPitchLimitPressed()) {
+            bool pitch_limit_pressed = turret_->IsPitchLimitPressed();
+
+            // DEBUG: Log pitch zeroing conditions every 2 seconds
+            if (!pitch_zeroed_) {
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "TELEOP_ZERO: Pitch zeroing - limit_pressed=%s, pitch_vel=%.3f",
+                    pitch_limit_pressed ? "YES" : "NO", teleop_pitch_velocity_);
+            }
+
+            if (!pitch_zeroed_ && pitch_limit_pressed) {
                 // Pitch limit switch pressed - zero the pitch encoder
                 turret_->ZeroPitchEncoder();
                 pitch_zeroed_ = true;

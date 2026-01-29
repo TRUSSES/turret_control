@@ -18,7 +18,15 @@ LoadCell::LoadCell()
 
 // Destructor.
 LoadCell::~LoadCell() {
-    // Nothing specific to clean up.
+    // Power down all HX711 chips to release GPIO pins
+    try {
+        hx1.power_down();
+        hx2.power_down();
+        hx3.power_down();
+        std::cout << "LoadCell: All HX711 chips powered down" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "LoadCell destructor: Failed to power down HX711 chips: " << e.what() << std::endl;
+    }
 }
 
 // Tare the load cells.

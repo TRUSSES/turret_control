@@ -11,13 +11,9 @@
 #include "turret_control/srv/set_state.hpp"
 #include "turret.h"
 #include "config.h"
-#include "load_cell.h"
 #include <chrono>
 #include <memory>
-#include <thread>
 #include <future>
-#include <mutex>
-#include <atomic>
 #include <signal.h>
 #include <pigpio.h>
 
@@ -54,12 +50,7 @@ private:
 public:
     TurretROS2Node() : Node(createNodeName()), turret_id_(1) // Default turret_id
     {
-        // Initialize pigpio
-        if (gpioInitialise() < 0) {
-            RCLCPP_ERROR(this->get_logger(), "Failed to initialize pigpio");
-            rclcpp::shutdown();
-            return;
-        }
+        // pigpio is initialised in main() before this constructor runs
 
         // Declare parameter for config path
         this->declare_parameter("config_path", "config/config.yaml");
@@ -129,8 +120,6 @@ public:
         state_pub_ = this->create_publisher<turret_control::msg::TurretState>(topic_prefix_ + "/state", 10);
         velocities_pub_ = this->create_publisher<turret_control::msg::TurretVelocities>(
             "cmd_vel/" + topic_prefix_ + "/velocities", 10);
-        load_cell_pub_ = this->create_publisher<turret_control::msg::LoadCellForce>(
-            topic_prefix_ + "/load_cell_force", 10);
 
         // Subscribers
         zipper_cmd_sub_ = this->create_subscription<turret_control::msg::ZipperCommand>(
@@ -140,6 +129,11 @@ public:
         teleop_cmd_sub_ = this->create_subscription<turret_control::msg::TurretTeleopCommand>(
             topic_prefix_ + "/teleop_command", 10,
             std::bind(&TurretROS2Node::teleopCommandCallback, this, std::placeholders::_1));
+
+        // Subscribe to load cell force data published by LoadCellNode
+        load_cell_force_sub_ = this->create_subscription<turret_control::msg::LoadCellForce>(
+            topic_prefix_ + "/load_cell_force", 10,
+            std::bind(&TurretROS2Node::loadCellForceCallback, this, std::placeholders::_1));
 
         // Services
         try {
@@ -157,11 +151,6 @@ public:
                 topic_prefix_ + "/zero_yaw",
                 std::bind(&TurretROS2Node::zeroYawCallback, this, std::placeholders::_1, std::placeholders::_2));
             RCLCPP_INFO(this->get_logger(), "Zero yaw service created: /%s/zero_yaw", topic_prefix_.c_str());
-
-            stop_load_cells_service_ = this->create_service<std_srvs::srv::Trigger>(
-                topic_prefix_ + "/stop_load_cells",
-                std::bind(&TurretROS2Node::stopLoadCellsCallback, this, std::placeholders::_1, std::placeholders::_2));
-            RCLCPP_INFO(this->get_logger(), "Stop load cells service created: /%s/stop_load_cells", topic_prefix_.c_str());
 
             // Test services (uncomment if needed for debugging)
             // test_service_ = this->create_service<std_srvs::srv::Empty>(
@@ -195,58 +184,12 @@ public:
         //     std::bind(&TurretROS2Node::debugLog, this));
 
         RCLCPP_INFO(this->get_logger(), "Turret ROS2 node initialized successfully");
-
-        // Initialize load cells in MAIN THREAD (while state machine is in IDLE)
-        // This must happen in the main thread due to pigpio/GPIO requirements
-        RCLCPP_INFO(this->get_logger(), "Initializing load cells in main thread (state: IDLE)...");
-        RCLCPP_INFO(this->get_logger(), "Waiting 10 seconds for HX711 chips to stabilize...");
-        std::this_thread::sleep_for(std::chrono::seconds(10));
-
-        initializeLoadCells();
-
-        // Start load cell reading/publishing thread (only if initialization succeeded)
-        if (load_cell_ready_ && load_cell_) {
-            startLoadCellThread();
-        } else {
-            RCLCPP_WARN(this->get_logger(), "Load cells not initialized - thread will not start");
-        }
     }
 
     ~TurretROS2Node()
     {
-        RCLCPP_INFO(this->get_logger(), "Shutting down turret node - cleaning up resources...");
-
-        // Cleanup load cells
-        cleanupLoadCells();
-
-        // Terminate GPIO last
-        RCLCPP_INFO(this->get_logger(), "Terminating pigpio...");
-        gpioTerminate();
-        RCLCPP_INFO(this->get_logger(), "Turret node shutdown complete");
-    }
-
-    // Public method to cleanup load cells (called by signal handler or service)
-    void cleanupLoadCells()
-    {
-        RCLCPP_INFO(this->get_logger(), "Cleaning up load cells...");
-
-        // Step 1: Stop the thread
-        if (load_cell_thread_running_) {
-            RCLCPP_INFO(this->get_logger(), "Stopping load cell thread...");
-            load_cell_thread_running_ = false;
-            if (load_cell_thread_.joinable()) {
-                load_cell_thread_.join();
-            }
-            RCLCPP_INFO(this->get_logger(), "Load cell thread stopped");
-        }
-
-        // Step 2: Power down and destroy load cell object
-        if (load_cell_) {
-            RCLCPP_INFO(this->get_logger(), "Powering down HX711 chips...");
-            load_cell_.reset();  // Calls LoadCell destructor → HX711 power_down()
-            RCLCPP_INFO(this->get_logger(), "Load cell hardware powered down");
-            load_cell_ready_ = false;
-        }
+        RCLCPP_INFO(this->get_logger(), "Shutting down turret node");
+        // pigpio is terminated in main() after all nodes are destroyed
     }
 
 private:
@@ -260,11 +203,9 @@ private:
 
     // Core components
     std::unique_ptr<Turret> turret_;
-    std::unique_ptr<LoadCell> load_cell_;
     YAML::Node config_;
     int turret_id_;
     std::string topic_prefix_;
-    bool load_cell_ready_;
     
     // State machine variables
     TurretState current_state_;
@@ -285,15 +226,19 @@ private:
     double current_yaw_angle_ = 0.0;    // Current yaw angle from motor feedback
     
     
+    // Cached load cell data received from LoadCellNode (updated via subscription)
+    double latest_lc_force_{0.0};
+    bool latest_lc_ready_{false};
+
     // ROS2 publishers
     rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr heartbeat_pub_;
     rclcpp::Publisher<turret_control::msg::TurretState>::SharedPtr state_pub_;
     rclcpp::Publisher<turret_control::msg::TurretVelocities>::SharedPtr velocities_pub_;
-    rclcpp::Publisher<turret_control::msg::LoadCellForce>::SharedPtr load_cell_pub_;
 
     // ROS2 subscribers
     rclcpp::Subscription<turret_control::msg::ZipperCommand>::SharedPtr zipper_cmd_sub_;
     rclcpp::Subscription<turret_control::msg::TurretTeleopCommand>::SharedPtr teleop_cmd_sub_;
+    rclcpp::Subscription<turret_control::msg::LoadCellForce>::SharedPtr load_cell_force_sub_;
 
     // Teleop command variables
     double teleop_sz_velocity_ = 0.0;
@@ -304,7 +249,6 @@ private:
     rclcpp::Service<turret_control::srv::ZeroTurret>::SharedPtr zero_service_;
     rclcpp::Service<turret_control::srv::SetState>::SharedPtr set_state_service_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr zero_yaw_service_;
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stop_load_cells_service_;
     rclcpp::Service<std_srvs::srv::Empty>::SharedPtr test_service_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr trigger_service_;
     
@@ -313,13 +257,6 @@ private:
     rclcpp::TimerBase::SharedPtr update_timer_;
     rclcpp::TimerBase::SharedPtr state_timer_;
     rclcpp::TimerBase::SharedPtr debug_timer_;
-
-    // Load cell thread members
-    std::thread load_cell_thread_;
-    std::atomic<bool> load_cell_thread_running_{false};
-    std::mutex load_cell_mutex_;
-    double latest_force_{0.0};
-    bool latest_force_valid_{false};
 
     void heartbeatCallback()
     {
@@ -574,17 +511,9 @@ private:
         state_msg.sz_zeroed = sz_zeroed_;
         state_msg.pitch_zeroed = pitch_zeroed_;
         state_msg.yaw_zeroed = yaw_zeroed_;
-        state_msg.load_cell_ready = load_cell_ready_;
-
-        // Get force data from load cell thread (non-blocking, thread-safe)
-        {
-            std::lock_guard<std::mutex> lock(load_cell_mutex_);
-            if (latest_force_valid_) {
-                state_msg.force = latest_force_;
-            } else {
-                state_msg.force = 0.0;
-            }
-        }
+        // Force and readiness come from the separate LoadCellNode via subscription
+        state_msg.load_cell_ready = latest_lc_ready_;
+        state_msg.force = latest_lc_force_;
 
         switch (current_state_) {
             case TurretState::IDLE:
@@ -613,132 +542,11 @@ private:
         state_pub_->publish(state_msg);
     }
     
-    void initializeLoadCells()
+    // Receives force data published by LoadCellNode and caches it for the state message
+    void loadCellForceCallback(const turret_control::msg::LoadCellForce::SharedPtr msg)
     {
-        load_cell_ready_ = false;
-
-        try {
-            // CRITICAL: Reset GPIO pins before creating LoadCell
-            // This ensures pins are in a clean state even after previous node crash
-            RCLCPP_INFO(this->get_logger(), "Resetting HX711 GPIO pins to clean state...");
-            LoadCell::ResetGPIOPins();
-            RCLCPP_INFO(this->get_logger(), "GPIO pins reset complete");
-
-            // Additional delay after GPIO reset for HX711 chips to stabilize
-            RCLCPP_INFO(this->get_logger(), "Waiting 2 more seconds after GPIO reset...");
-            std::this_thread::sleep_for(std::chrono::seconds(2));
-
-            RCLCPP_INFO(this->get_logger(), "Creating LoadCell object (initializing HX711 hardware)...");
-            load_cell_ = std::make_unique<LoadCell>();
-            RCLCPP_INFO(this->get_logger(), "LoadCell hardware initialized successfully!");
-
-            // Try different paths for load cell config file, similar to main config
-            std::string config_filename = "turret_" + std::to_string(turret_id_) + "_lc_config.cfg";
-            std::vector<std::string> config_paths = {
-                "config/" + config_filename,
-                "../config/" + config_filename,
-                "/home/turret/ros_ws/src/turret_control/config/" + config_filename,
-                config_filename  // Try current directory as fallback
-            };
-
-            bool loaded = false;
-            RCLCPP_INFO(this->get_logger(), "Attempting to load calibration file: %s", config_filename.c_str());
-
-            for (const auto& config_path : config_paths) {
-                RCLCPP_INFO(this->get_logger(), "Trying calibration path: %s", config_path.c_str());
-                if (load_cell_->loadCalibrationData(config_path)) {
-                    load_cell_ready_ = true;
-                    loaded = true;
-                    RCLCPP_INFO(this->get_logger(), "Load cells initialized successfully with config: %s", config_path.c_str());
-                    break;
-                }
-            }
-
-            if (!loaded) {
-                RCLCPP_WARN(this->get_logger(), "Failed to load load cell calibration from any attempted path:");
-                for (const auto& path : config_paths) {
-                    RCLCPP_WARN(this->get_logger(), "  - %s", path.c_str());
-                }
-                RCLCPP_WARN(this->get_logger(), "Load cells will not be available until calibrated");
-                RCLCPP_INFO(this->get_logger(), "To calibrate: ros2 run turret_control calibrate_load_cells config/%s", config_filename.c_str());
-            }
-        } catch (const std::exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "Failed to initialize load cells: %s", e.what());
-            load_cell_ready_ = false;
-        }
-    }
-
-    void startLoadCellThread()
-    {
-        // Load cells are already initialized in main thread
-        // This thread just reads and publishes
-        load_cell_thread_running_ = true;
-        load_cell_thread_ = std::thread(&TurretROS2Node::loadCellThreadFunction, this);
-        RCLCPP_INFO(this->get_logger(), "Load cell reading/publishing thread started");
-    }
-
-    void loadCellThreadFunction()
-    {
-        // Load cells are already initialized in the main thread
-        // This thread ONLY reads and publishes data
-        RCLCPP_INFO(this->get_logger(), "Load cell thread started - beginning data acquisition");
-
-        // Publishing rate for load cell data (configurable, default 50Hz)
-        const auto publish_rate = std::chrono::milliseconds(20);  // 50Hz
-
-        while (load_cell_thread_running_ && rclcpp::ok()) {
-            auto start_time = std::chrono::steady_clock::now();
-
-            try {
-                if (load_cell_ && load_cell_ready_) {
-                    // Read force from load cells
-                    double force = load_cell_->getForce("N");
-
-                    // Update latest force with mutex protection
-                    {
-                        std::lock_guard<std::mutex> lock(load_cell_mutex_);
-                        latest_force_ = force;
-                        latest_force_valid_ = true;
-                    }
-
-                    // Publish load cell force message
-                    auto msg = turret_control::msg::LoadCellForce();
-                    msg.header.stamp = this->now();
-                    msg.header.frame_id = topic_prefix_;
-                    msg.force = force;
-                    msg.calibrated = load_cell_ready_;
-
-                    load_cell_pub_->publish(msg);
-
-                    // Log occasionally for debugging (every 2 seconds at 50Hz = 100 iterations)
-                    static int log_counter = 0;
-                    if (++log_counter >= 100) {
-                        RCLCPP_DEBUG(this->get_logger(), "Load cell force: %.2f N", force);
-                        log_counter = 0;
-                    }
-                }
-            } catch (const std::exception& e) {
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                    "Error reading load cell in thread: %s", e.what());
-
-                // Mark force as invalid on error
-                {
-                    std::lock_guard<std::mutex> lock(load_cell_mutex_);
-                    latest_force_valid_ = false;
-                }
-            }
-
-            // Sleep to maintain publish rate
-            auto end_time = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-            auto sleep_time = publish_rate - elapsed;
-
-            if (sleep_time.count() > 0) {
-                std::this_thread::sleep_for(sleep_time);
-            }
-        }
-
-        RCLCPP_INFO(this->get_logger(), "Load cell thread exiting");
+        latest_lc_force_ = msg->force;
+        latest_lc_ready_ = msg->calibrated;
     }
 
 
@@ -1045,96 +853,63 @@ private:
         }
     }
 
-    void stopLoadCellsCallback(
-        const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
-        std::shared_ptr<std_srvs::srv::Trigger::Response> response)
-    {
-        (void)request;  // Unused
-
-        try {
-            cleanupLoadCells();
-            response->success = true;
-            response->message = "Load cells stopped and powered down successfully";
-            RCLCPP_INFO(this->get_logger(), "Load cells stopped via service");
-        } catch (const std::exception& e) {
-            response->success = false;
-            response->message = std::string("Failed to stop load cells: ") + e.what();
-            RCLCPP_ERROR(this->get_logger(), "Failed to stop load cells: %s", e.what());
-        }
-    }
 };
 
-// Global node pointer for signal handler
-std::shared_ptr<TurretROS2Node> g_node;
+// LoadCellNode runs as a separate rclcpp::Node in the same process.
+// Its implementation is in load_cell_ros2_node.cpp (linked into this executable).
+#include "load_cell_node.h"
 
-// Signal handler for graceful shutdown
-void signalHandler(int signum) {
-    std::cout << "\n\n========================================" << std::endl;
-    std::cout << "Interrupt signal (" << signum << ") received." << std::endl;
-    std::cout << "Initiating graceful shutdown..." << std::endl;
-    std::cout << "========================================\n" << std::endl;
-
-    // Cleanup load cells BEFORE rclcpp::shutdown()
-    if (g_node) {
-        try {
-            std::cout << "Cleaning up load cells before shutdown..." << std::endl;
-            g_node->cleanupLoadCells();
-            std::cout << "Load cells cleaned up successfully" << std::endl;
-        } catch (const std::exception& e) {
-            std::cerr << "Error during load cell cleanup: " << e.what() << std::endl;
-        }
-    }
-
-    // Now shutdown ROS
+// Signal handler – just requests ROS shutdown; node destructors handle cleanup
+void signalHandler(int /*signum*/)
+{
+    std::cout << "\nShutdown signal received – stopping..." << std::endl;
     rclcpp::shutdown();
 }
 
-int main(int argc, char * argv[])
+int main(int argc, char* argv[])
 {
     rclcpp::init(argc, argv);
 
-    std::shared_ptr<TurretROS2Node> node;
+    // Initialise pigpio once for the entire process.
+    // Both TurretROS2Node and LoadCellNode share this single pigpio context.
+    if (gpioInitialise() < 0) {
+        std::cerr << "Failed to initialise pigpio – aborting" << std::endl;
+        return 1;
+    }
+
+    // Register signal handlers after pigpio (which installs its own handlers)
+    signal(SIGINT, signalHandler);
+    signal(SIGTERM, signalHandler);
 
     try {
-        node = std::make_shared<TurretROS2Node>();
-        g_node = node;  // Set global pointer for signal handler
+        // LoadCellNode is created FIRST so the HX711 chips initialise in a clean
+        // GPIO environment – before the pi3hat (SPI1/GPIO 20-29) and encoder ISRs
+        // (GPIO 16/19) are set up by TurretROS2Node.  Timer callbacks in both nodes
+        // only start firing once executor.spin() is called, so ordering here only
+        // affects GPIO initialisation, not runtime behaviour.
+        auto load_cell_node = std::make_shared<LoadCellNode>();
+        auto turret_node = std::make_shared<TurretROS2Node>();
 
-        // Register signal handlers AFTER node creation (pigpio has installed its handlers)
-        // We override them here
-        signal(SIGINT, signalHandler);
-        signal(SIGTERM, signalHandler);
+        RCLCPP_INFO(turret_node->get_logger(),
+            "Both nodes created – starting MultiThreadedExecutor");
 
-        RCLCPP_INFO(node->get_logger(), "Turret control node created successfully");
-        RCLCPP_INFO(node->get_logger(), "Signal handlers registered for graceful shutdown");
-        RCLCPP_INFO(node->get_logger(), "Starting to spin - ready to process callbacks...");
+        // MultiThreadedExecutor lets load cell and turret callbacks run in
+        // parallel so slow HX711 bit-banging cannot block the control loop.
+        rclcpp::executors::MultiThreadedExecutor executor;
+        executor.add_node(turret_node);
+        executor.add_node(load_cell_node);
+        executor.spin();
 
-        // Try SingleThreadedExecutor first to isolate threading issues
-        rclcpp::executors::SingleThreadedExecutor executor;
-        executor.add_node(node);
-
-        RCLCPP_INFO(node->get_logger(), "Executor created, starting to spin...");
-
-        // Spin with timeout to check if executor is working
-        while (rclcpp::ok()) {
-            executor.spin_some(std::chrono::milliseconds(100));
-            // This should allow us to see if callbacks are being processed
-        }
-
-        RCLCPP_INFO(node->get_logger(), "Exiting spin loop - cleaning up...");
+        // Destroy in reverse construction order
+        turret_node.reset();
+        load_cell_node.reset();
 
     } catch (const std::exception& e) {
-        std::cerr << "Node initialization or runtime error: " << e.what() << std::endl;
+        std::cerr << "Fatal error: " << e.what() << std::endl;
     }
 
-    // Explicitly destroy node before shutting down rclcpp
-    // This ensures destructor is called and resources are cleaned up properly
-    if (node) {
-        std::cout << "Destroying node object..." << std::endl;
-        node.reset();  // Calls ~TurretROS2Node() destructor
-        std::cout << "Node destroyed" << std::endl;
-    }
-
+    gpioTerminate();
     rclcpp::shutdown();
-    std::cout << "ROS2 shutdown complete" << std::endl;
+    std::cout << "Shutdown complete" << std::endl;
     return 0;
 }

@@ -347,7 +347,6 @@ void Turret::SetPitchVelocity(double velocity) {
   //std::cout << "DEBUG: SetPitchVelocity called with velocity=" << velocity << " rad/s" << std::endl;
   //if (pitch_motor_) {
     pitch_motor_->sendCommandMITMode(0.0, velocity, 0.0, 0.3, 0.0);
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
     //std::cout << "DEBUG: Sent velocity command to pitch motor" << std::endl;
   //} else {
     //std::cout << "ERROR: pitch_motor_ is NULL in SetPitchVelocity" << std::endl;
@@ -361,7 +360,6 @@ void Turret::SetYawVelocity(double velocity) {
   // Setting position=0, Kp=0 makes it pure velocity control
   if (yaw_motor_) {
     yaw_motor_->sendCommandMITMode(0.0, velocity, 0.0, 0.3, 0.0);
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
 }
 

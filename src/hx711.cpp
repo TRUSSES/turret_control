@@ -174,8 +174,9 @@ bool HX711::_set_channel_gain(int num) {
 int HX711::_read() {
     gpioWrite(_pd_sck, 0);
     int ready_counter = 0;
-    // If using channel A gain 128, wait longer (~100ms total), otherwise use 40 iterations.
-    int max_iterations = (_gain_channel_A == 128) ? 100 : 40;
+    // HX711 at 10 SPS has a 100 ms conversion period. Allow 5 full cycles (500 ms)
+    // to tolerate Linux scheduling jitter and post-reset startup delays.
+    int max_iterations = 500;
     while (!_ready() && ready_counter <= max_iterations) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         ready_counter++;

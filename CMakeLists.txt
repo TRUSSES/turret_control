@@ -51,9 +51,12 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 
 # -------------------------------
 # ROS2 node executable
+# Composes TurretROS2Node + LoadCellNode in one process via MultiThreadedExecutor.
+# Both share a single pigpio context – no multi-process GPIO conflict.
 # -------------------------------
 add_executable(turret_ros2_node
     src/turret_ros2_node.cpp
+    src/load_cell_ros2_node.cpp   # provides LoadCellNode (no standalone main)
     src/turret.cpp
     src/spiral_zipper.cpp
     src/servo_city_motor.cpp
@@ -73,7 +76,7 @@ target_include_directories(turret_ros2_node PRIVATE include)
 ament_target_dependencies(turret_ros2_node
   rclcpp
   std_msgs
-  geometry_msgs  
+  geometry_msgs
   sensor_msgs
   std_srvs
 )
@@ -92,27 +95,36 @@ target_link_libraries(turret_ros2_node "${cpp_typesupport_target}")
 add_dependencies(turret_ros2_node ${PROJECT_NAME})
 
 # -------------------------------
-# Legacy standalone executable (optional)
+# Standalone load cell node executable
+# Useful for testing load cells independently (e.g. during calibration)
+# when the turret node is not running.
+# Define LOAD_CELL_STANDALONE_MAIN so load_cell_ros2_node.cpp compiles its main().
 # -------------------------------
-add_executable(turret_legacy
-    src/turret_controller.cpp
-    src/turret.cpp
-    src/spiral_zipper.cpp
-    src/servo_city_motor.cpp
-    src/encoder.cpp
-    src/limit_switch.cpp
-    src/cubemars_control.cpp
-    src/cubemars_pi3hat.cpp
-    src/pi3hat.cpp
-    src/config.cpp
-    src/hx711.cpp
-    src/e_stop.cpp
+add_executable(load_cell_ros2_node
+    src/load_cell_ros2_node.cpp
     src/load_cell.cpp
+    src/hx711.cpp
 )
-target_include_directories(turret_legacy PRIVATE include)
-target_link_libraries(turret_legacy PRIVATE pigpio yaml-cpp bcm_host)
 
-# -------------------------------
+target_compile_definitions(load_cell_ros2_node PRIVATE LOAD_CELL_STANDALONE_MAIN)
+target_include_directories(load_cell_ros2_node PRIVATE include)
+
+ament_target_dependencies(load_cell_ros2_node
+  rclcpp
+  std_msgs
+  std_srvs
+)
+
+target_link_libraries(load_cell_ros2_node
+  pigpio
+  yaml-cpp
+)
+
+rosidl_get_typesupport_target(lc_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(load_cell_ros2_node "${lc_typesupport_target}")
+add_dependencies(load_cell_ros2_node ${PROJECT_NAME})
+
+#-------------------------------
 # Calibration executable
 # -------------------------------
 add_executable(calibrate_load_cells
@@ -122,6 +134,18 @@ add_executable(calibrate_load_cells
 )
 target_include_directories(calibrate_load_cells PRIVATE include)
 target_link_libraries(calibrate_load_cells PRIVATE pigpio)
+
+# -------------------------------
+# Standalone load cell hardware diagnostic (no ROS2)
+# Run: sudo ./install/turret_control/lib/turret_control/test_load_cells
+# -------------------------------
+add_executable(test_load_cells
+    tests/test_load_cells.cpp
+    src/load_cell.cpp
+    src/hx711.cpp
+)
+target_include_directories(test_load_cells PRIVATE include)
+target_link_libraries(test_load_cells PRIVATE pigpio)
 
 # -------------------------------
 # Test target: turret_tests executable
@@ -153,7 +177,7 @@ target_link_libraries(calibrate_load_cells PRIVATE pigpio)
 # -------------------------------
 # ROS2 Installation
 # -------------------------------
-install(TARGETS turret_ros2_node turret_legacy calibrate_load_cells
+install(TARGETS turret_ros2_node load_cell_ros2_node calibrate_load_cells test_load_cells
   DESTINATION lib/${PROJECT_NAME}
 )
 

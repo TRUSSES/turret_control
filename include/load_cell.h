@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <utility>
+#include <memory>
 #include "hx711.h"
 
 class LoadCell {
@@ -35,10 +36,12 @@ public:
     double getForce(const std::string& unit = "g");
 
 private:
-    // Three HX711 objects for the load cells.
-    HX711 hx1;
-    HX711 hx2;
-    HX711 hx3;
+    // Three HX711 objects. Any chip that fails to initialise is left as nullptr
+    // and silently skipped in all read/tare/calibrate operations.
+    std::unique_ptr<HX711> hx1;
+    std::unique_ptr<HX711> hx2;
+    std::unique_ptr<HX711> hx3;
+    int active_chips_{0};  // count of chips that initialised successfully
 
     // Global calibration parameters for the summed (tared) readings.
     double global_m;

@@ -97,6 +97,8 @@ public:
             turret_ = std::make_unique<Turret>(config_);
             turret_->Init();
             RCLCPP_INFO(this->get_logger(), "Turret initialized successfully");
+            RCLCPP_INFO(this->get_logger(), "Initial turret limit switch state: %s",
+                        turret_->IsTurretLimitPressed() ? "PRESSED" : "RELEASED");
         } catch (const std::exception& e) {
             RCLCPP_ERROR(this->get_logger(), "Failed to initialize turret: %s", e.what());
             rclcpp::shutdown();
@@ -107,6 +109,9 @@ public:
         current_state_ = TurretState::IDLE;
         is_zeroed_ = false;
         is_zeroing_ = false;
+        sz_zeroed_ = false;
+        pitch_zeroed_ = false;
+        yaw_zeroed_ = false;
         current_extension_ = 0.0;
         current_velocity_ = 0.0;
         desired_length_ = 0.0;  // Initialize to prevent oscillation
@@ -303,6 +308,13 @@ private:
             if (yaw_zeroed_) {
                 current_yaw_angle_ = turret_->GetYawAngle();
             }
+
+            // Reset stale pitch-zeroed UI state unless zeroing has completed or switch indicates zero.
+            if (!is_zeroed_ && !is_zeroing_) {
+            if (pitch_zeroed_ && !turret_->IsTurretLimitPressed()) {
+                pitch_zeroed_ = false;
+            }
+        }
         }
     }
 
@@ -359,12 +371,17 @@ private:
                 
                 if (success) {
                     is_zeroed_ = true;
+                    sz_zeroed_ = true;
+                    pitch_zeroed_ = true;
                     current_state_ = TurretState::READY;
                     current_extension_ = 0.0;
                     current_velocity_ = 0.0;
                     RCLCPP_INFO(this->get_logger(), "Turret zeroing completed successfully! State changed to READY");
                 } else {
                     RCLCPP_ERROR(this->get_logger(), "Turret zeroing failed! Returning to IDLE state");
+                    is_zeroed_ = false;
+                    sz_zeroed_ = false;
+                    pitch_zeroed_ = false;
                     current_state_ = TurretState::IDLE;
                 }
             } else {
@@ -442,9 +459,8 @@ private:
         try {
             if (!turret_) return;
 
-            // Execute velocity commands same as teleop
+            // Execute SZ and yaw commands continuously in zero mode.
             turret_->SetSpiralZipperVelocity(teleop_sz_velocity_);
-            turret_->SetPitchVelocity(teleop_pitch_velocity_);
             turret_->SetYawVelocity(teleop_yaw_velocity_);
 
             // Publish velocity commands
@@ -468,21 +484,31 @@ private:
                 RCLCPP_INFO(this->get_logger(), "TELEOP_ZERO: Spiral zipper zeroed");
             }
 
-            // Monitor pitch limit switch for zeroing
-            bool pitch_limit_pressed = turret_->IsPitchLimitPressed();
+            // Monitor turret limit switch for zeroing (used to zero pitch encoder)
+            bool turret_limit_pressed = turret_->IsTurretLimitPressed();
 
             // DEBUG: Log pitch zeroing conditions every 2 seconds
             if (!pitch_zeroed_) {
                 RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                    "TELEOP_ZERO: Pitch zeroing - limit_pressed=%s, pitch_vel=%.3f",
-                    pitch_limit_pressed ? "YES" : "NO", teleop_pitch_velocity_);
+                    "TELEOP_ZERO: Pitch zeroing (turret switch) - limit_pressed=%s, pitch_vel=%.3f",
+                    turret_limit_pressed ? "YES" : "NO", teleop_pitch_velocity_);
             }
 
-            if (!pitch_zeroed_ && pitch_limit_pressed) {
-                // Pitch limit switch pressed - zero the pitch encoder
-                turret_->ZeroPitchEncoder();
-                pitch_zeroed_ = true;
-                RCLCPP_INFO(this->get_logger(), "TELEOP_ZERO: Pitch encoder zeroed");
+            if (!pitch_zeroed_ && turret_limit_pressed) {
+                // Stop pitch whenever turret limit switch is pressed.
+                turret_->SetPitchVelocity(0.0);
+
+                // Only accept pitch zero when SZ has already completed zeroing.
+                if (sz_zeroed_) {
+                    turret_->ZeroPitchEncoder();
+                    pitch_zeroed_ = true;
+                    RCLCPP_INFO(this->get_logger(),
+                                 "TELEOP_ZERO: SZ is zeroed and turret switch pressed, pitch encoder zeroed");
+                }
+            } else {
+                // If switch is not pressed, keep following the requested pitch command.
+                // This also re-activates motion after a release during zeroing.
+                turret_->SetPitchVelocity(teleop_pitch_velocity_);
             }
 
             // Yaw zeroing is triggered manually by user when in desired position
@@ -707,12 +733,13 @@ private:
             
             // Start zeroing in a separate thread to avoid blocking the executor
             is_zeroing_ = true;
+            sz_zeroed_ = false;
+            pitch_zeroed_ = false;
             zero_velocity_ = requested_velocity;  // Use requested velocity
             
             zero_future_ = std::async(std::launch::async, [this]() -> bool {
                 try {
-                    turret_->ZeroSpiralZipper(zero_velocity_);
-                    return true;
+                    return turret_->ZeroTurret(zero_velocity_);
                 } catch (const std::exception& e) {
                     RCLCPP_ERROR(this->get_logger(), "Zeroing failed: %s", e.what());
                     return false;

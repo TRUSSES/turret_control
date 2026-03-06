@@ -22,7 +22,7 @@ class LimitSwitch {
    * @param gpio_pin The GPIO pin number.
    * @param debounce_threshold_ms Debounce threshold in milliseconds.
    */
-  LimitSwitch(int gpio_pin, int debounce_threshold_ms = 30);
+  LimitSwitch(int gpio_pin, int debounce_threshold_ms = 30, bool active_low = true);
 
   /**
    * @brief Constructs a LimitSwitch using values from a YAML node.
@@ -60,6 +60,7 @@ class LimitSwitch {
   int debounce_threshold_ms_;
   bool last_state_;
   bool pressed_;
+  bool active_low_;
   StateChangeCallback callback_;
   std::chrono::steady_clock::time_point last_debounce_time_;
 

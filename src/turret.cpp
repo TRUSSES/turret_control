@@ -5,36 +5,6 @@
 
 static const double kTurretAngleScale = 2 * M_PI / 1024.0;
 
-Turret::Turret(int socket, float x_offset, float y_offset)
-    : turret_encoder_(0, 6, 5, 1023, 0),
-      pitch_encoder_(0, 0, 0, 1023, 0),  // TODO: Set correct pins for pitch encoder
-      turret_limit_switch_(20, 30),
-      spiral_zipper_(22, 27, 24, 25, 4, 13, 19, 16, 0.0005725, 30),
-      x_offset_(x_offset),
-      y_offset_(y_offset),
-      prev_turret_angle_(0.0),
-      last_turret_time_(std::chrono::steady_clock::now()) {
-
-    // Initialize Pi3Hat for all Cubemars motors
-    mjbots::pi3hat::Pi3Hat::Configuration pi3hat_config;
-    pi3hat_config.can[4].slow_bitrate = 1000000;
-    pi3hat_config.can[4].fdcan_frame = false;
-    pi3hat_config.can[4].bitrate_switch = false;
-    pi3hat_config.can[0].slow_bitrate = 0;
-    pi3hat_config.can[1].slow_bitrate = 0;
-    pi3hat_config.can[2].slow_bitrate = 0;
-    pi3hat_config.can[3].slow_bitrate = 0;
-
-    pi3hat_ = std::make_unique<mjbots::pi3hat::Pi3Hat>(pi3hat_config);
-
-    // Initialize motors via Pi3Hat (motor_id, can_bus, pi3hat_ptr)
-    pitch_motor_ = std::make_unique<CubemarsPi3Hat>(10, 0, pi3hat_.get());
-    yaw_motor_ = std::make_unique<CubemarsPi3Hat>(0xB, 0, pi3hat_.get());
-    // spool_motor_ = std::make_unique<CubemarsPi3Hat>(10, 0, pi3hat_.get());
-    std::cout << "DEBUG: Pitch motor initialized with ID 0xA" << std::endl;
-    std::cout << "DEBUG: Yaw motor initialized with ID 0xB" << std::endl;
-}
-
 Turret::Turret(const YAML::Node &node)
     : turret_encoder_(node["turret_encoder"]),
       pitch_encoder_(node["pitch_encoder"]),
@@ -44,12 +14,6 @@ Turret::Turret(const YAML::Node &node)
       y_offset_(node["y_offset"].as<float>()),
       prev_turret_angle_(0.0),
       last_turret_time_(std::chrono::steady_clock::now()) {
-
-    // Initialize pitch limit switch if configured
-    if (node["pitch_limit_switch"]) {
-        pitch_limit_switch_ = std::make_unique<LimitSwitch>(node["pitch_limit_switch"]);
-        std::cout << "DEBUG: Pitch limit switch initialized" << std::endl;
-    }
 
     // Initialize Pi3Hat for all Cubemars motors
     mjbots::pi3hat::Pi3Hat::Configuration pi3hat_config;
@@ -176,6 +140,112 @@ void Turret::ActuateSpiralZipperLength(float goal_dist) {
 
 void Turret::ActuateSpiralZipperLength(float goal_dist, double max_velocity) {
   spiral_zipper_.ActuateLength(goal_dist, max_velocity);
+}
+
+bool Turret::ZeroTurret(double retract_velocity, double pitch_velocity_ratio) {
+  constexpr double kMinZeroSpeed = 0.005;
+  constexpr double kMaxZeroSpeed = 3.0;
+  constexpr double kDefaultPitchVelocityRatio = 1.0;
+
+  if (!pitch_motor_) {
+    std::cout << "ZeroTurret aborted: pitch motor unavailable" << std::endl;
+    return false;
+  }
+
+  if (retract_velocity > 0.0) {
+    retract_velocity = -retract_velocity;
+  }
+  if (std::abs(retract_velocity) < kMinZeroSpeed) {
+    retract_velocity = -kMinZeroSpeed;
+  } else if (std::abs(retract_velocity) > kMaxZeroSpeed) {
+    retract_velocity = -kMaxZeroSpeed;
+  }
+
+  double ratio = pitch_velocity_ratio;
+  if (ratio <= 0.0) {
+    ratio = kDefaultPitchVelocityRatio;
+  }
+
+  double pitch_velocity = retract_velocity * ratio;
+  if (std::abs(pitch_velocity) < kMinZeroSpeed) {
+    pitch_velocity = (retract_velocity >= 0.0) ? kMinZeroSpeed : -kMinZeroSpeed;
+  } else if (std::abs(pitch_velocity) > kMaxZeroSpeed) {
+    pitch_velocity = (pitch_velocity > 0.0) ? kMaxZeroSpeed : -kMaxZeroSpeed;
+  }
+
+  spiral_zipper_.Stop();
+  pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
+  pitch_motor_->enterMITMode();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  std::cout << "ZeroTurret: pitch motor initialized (MIT mode entered), idling at pos="
+            << pitch_motor_->getPosition() << ", vel=" << pitch_motor_->getVelocity()
+            << std::endl;
+
+  bool sz_zeroed = false;
+  bool pitch_zeroed = false;
+  int loop_counter = 0;
+  int pitch_sign_retries = 0;
+  bool pitch_sign_flipped = false;
+
+  while (!sz_zeroed || !pitch_zeroed) {
+    ++loop_counter;
+    float current_pitch_vel = pitch_motor_->getVelocity();
+    float current_pitch_pos = pitch_motor_->getPosition();
+    bool turret_limit_pressed = turret_limit_switch_.IsPressed();
+
+    if (!sz_zeroed) {
+      if (spiral_zipper_.IsLimitSwitchPressed()) {
+        spiral_zipper_.Stop();
+        sz_zeroed = true;
+        spiral_zipper_.ResetCount();
+        std::cout << "SZ zero switch pressed: stopping zipper and resetting encoder" << std::endl;
+      } else {
+        spiral_zipper_.SetMotorVelocity(retract_velocity);
+      }
+    }
+
+    if (!pitch_zeroed) {
+      if (turret_limit_pressed) {
+        pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
+        if (sz_zeroed) {
+          pitch_encoder_.ResetCount();
+          pitch_zeroed = true;
+          std::cout << "Turret limit switch pressed and SZ already zeroed: stopping pitch motor and zeroing encoder"
+                    << std::endl;
+        } else {
+          std::cout << "Turret limit switch pressed: stopping pitch motor and waiting for SZ zero" << std::endl;
+        }
+      } else {
+        pitch_motor_->sendCommandMITMode(0.0, pitch_velocity, 0.0, 0.3, 0.0);
+        if (!pitch_sign_flipped && loop_counter > 200 && std::fabs(current_pitch_vel) < 0.001) {
+          pitch_sign_retries++;
+          if (pitch_sign_retries >= 3) {
+            pitch_velocity = -pitch_velocity;
+            pitch_sign_flipped = true;
+            std::cout << "ZeroTurret: pitch motor showed no motion, reversing pitch direction to "
+                      << pitch_velocity << " rad/s" << std::endl;
+          }
+        }
+      }
+    }
+
+    if (loop_counter % 50 == 0) {
+      std::cout << "ZeroTurret progress: sz_count=" << spiral_zipper_.GetEncoderCount()
+                << ", sz_zeroed=" << (sz_zeroed ? "YES" : "NO")
+                << ", pitch_zeroed=" << (pitch_zeroed ? "YES" : "NO")
+                << ", pitch_vel=" << current_pitch_vel
+                << ", pitch_pos=" << current_pitch_pos
+                << ", turret_limit_pressed=" << (turret_limit_pressed ? "YES" : "NO")
+                << ", pitch_cmd=" << pitch_velocity << std::endl;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  spiral_zipper_.Stop();
+  pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
+
+  return true;
 }
 
 void Turret::StopSpiralZipper() {
@@ -385,7 +455,7 @@ void Turret::StopAllMotors() {
 
 // Zeroing methods for teleop zero mode
 void Turret::ZeroPitchEncoder() {
-  // Reset pitch encoder count to zero (called when pitch limit switch is pressed)
+  // Reset pitch encoder count to zero (called when turret limit switch is pressed)
   pitch_encoder_.ResetCount();
   std::cout << "DEBUG: Pitch encoder zeroed" << std::endl;
 }
@@ -400,19 +470,12 @@ void Turret::ZeroYawMotor() {
 }
 
 bool Turret::IsSpiralZipperLimitPressed() const {
-  // The spiral zipper has its own limit switch - delegate to it
-  // Access via the spiral_zipper's internal limit switch
-  // We need to expose this - for now return false as placeholder
-  // The SZ zeroing is handled internally by spiral_zipper_.Zero()
-  return false;  // TODO: Expose spiral zipper limit switch state if needed
+  return spiral_zipper_.IsLimitSwitchPressed();
 }
 
-bool Turret::IsPitchLimitPressed() const {
-  // Check if pitch limit switch is pressed
-  if (pitch_limit_switch_) {
-    return pitch_limit_switch_->IsPressed();
-  }
-  return false;
+bool Turret::IsTurretLimitPressed() const {
+  // Turret limit switch is the authoritative input for pitch zeroing.
+  return turret_limit_switch_.IsPressed();
 }
 
 // Position feedback methods

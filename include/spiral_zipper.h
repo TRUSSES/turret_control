@@ -51,6 +51,9 @@ public:
 
   // Returns the current extension in meters.
   double GetExtension() const;
+
+  // Return whether the zipper limit switch is pressed.
+  bool IsLimitSwitchPressed() const;
   
   // Reset the count manually (for debugging)
   void ResetCount() { zipper_encoder_.ResetCount(); }

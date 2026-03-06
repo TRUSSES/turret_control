@@ -244,3 +244,7 @@ double SpiralZipper::GetExtension() const {
   // Use the same calculation as reference: count * (EXTENSION_PER_STEP * 4)
   return zipper_encoder_.GetCount() * (extension_per_step_ * 4);
 }
+
+bool SpiralZipper::IsLimitSwitchPressed() const {
+  return limit_switch_.IsPressed();
+}

@@ -45,9 +45,6 @@ struct SpoolTracker {
 
 class Turret {
  public:
-  // Constructor using explicit parameters.
-  Turret(int socket, float x_offset = 0.0f, float y_offset = 0.0f);
-  
   // Overloaded constructor that reads configuration from YAML.
   explicit Turret(const YAML::Node &node);
   
@@ -74,6 +71,10 @@ class Turret {
   double GetSpoolWireLength() const;
   double GetPitchAngle() const;
 
+  // Combined zeroing routine for automatic zero sequence.
+  // Returns true when both the spiral zipper limit and turret limit are reached.
+  bool ZeroTurret(double retract_velocity, double pitch_velocity_ratio = 1.0);
+
   // Combined spiral zipper + spool control
   void ActuateCoupledExtension(float goal_dist, float desired_pitch_deg);
 
@@ -88,8 +89,8 @@ class Turret {
   // Zeroing methods for teleop zero mode
   void ZeroPitchEncoder();          // Reset pitch encoder when limit switch pressed
   void ZeroYawMotor();              // Send zero command to yaw motor
-  bool IsSpiralZipperLimitPressed() const;  // Check if SZ limit switch is pressed
-  bool IsPitchLimitPressed() const;         // Check if pitch limit switch is pressed
+  bool IsSpiralZipperLimitPressed() const;   // Check if SZ limit switch is pressed
+  bool IsTurretLimitPressed() const;         // Check if turret limit switch is pressed
 
   // Position feedback methods
   double GetYawAngle() const;       // Get yaw position from motor feedback (radians)
@@ -104,7 +105,6 @@ class Turret {
   Encoder turret_encoder_;
   Encoder pitch_encoder_;  // Bourns EMS encoder for pitch angle
   LimitSwitch turret_limit_switch_;
-  std::unique_ptr<LimitSwitch> pitch_limit_switch_;  // Limit switch for pitch zeroing
   SpiralZipper spiral_zipper_;
 
   // Cubemars motors via Pi3Hat

@@ -14,6 +14,7 @@
 #include <chrono>
 #include <memory>
 #include <future>
+#include <algorithm>
 #include <signal.h>
 #include <pigpio.h>
 
@@ -56,7 +57,7 @@ public:
         this->declare_parameter("config_path", "config/config.yaml");
         
         // Declare zero velocity parameter
-        this->declare_parameter("zero_velocity", -0.5);
+        this->declare_parameter("zero_velocity", -0.2);
         
         // Load configuration - try different paths
         std::vector<std::string> config_paths = {
@@ -110,7 +111,9 @@ public:
         current_velocity_ = 0.0;
         desired_length_ = 0.0;  // Initialize to prevent oscillation
         desired_velocity_ = 0.0;  // Initialize to prevent oscillation
-        zero_velocity_ = -0.3;  // Match the original zero function default
+        // Keep a conservative internal default for spiral zipper zeroing.
+        // Actual runtime value comes from the "zero_velocity" parameter.
+        zero_velocity_ = -0.2;
         
         RCLCPP_INFO(this->get_logger(), "State machine initialized - State: IDLE, Zeroed: %s", 
             is_zeroed_ ? "true" : "false");
@@ -384,18 +387,25 @@ private:
                 // From config: extension_per_step = 0.000004453125, so meters_per_count = 0.000017812500
                 // For a spiral mechanism, we need to convert linear velocity to angular velocity
                 // For now, we'll use the velocity directly as it appears to be in correct units already
+                constexpr double kMinCommandVelocity = 0.05;
+                constexpr double kMaxCommandVelocity = 2.0;
                 double max_velocity = std::abs(desired_velocity_);
 
                 if (max_velocity > 0.0) {
+                    if (max_velocity < kMinCommandVelocity) {
+                        max_velocity = kMinCommandVelocity;
+                    } else if (max_velocity > kMaxCommandVelocity) {
+                        max_velocity = kMaxCommandVelocity;
+                    }
                     turret_->ActuateSpiralZipperLength(desired_length_, max_velocity);
                 } else {
                     // Fallback to position-only control if no velocity specified
                     turret_->ActuateSpiralZipperLength(desired_length_);
                 }
 
-                RCLCPP_INFO(this->get_logger(),
-                    "EXECUTING zipper command: length=%.3f meters, max_velocity=%.3f",
-                    desired_length_, max_velocity);
+    // RCLCPP_INFO(this->get_logger(),
+    //     "EXECUTING zipper command: length=%.3f meters, max_velocity=%.3f",
+    //     desired_length_, max_velocity);
             }
         } catch (const std::exception& e) {
             RCLCPP_ERROR(this->get_logger(), "Error executing zipper command: %s", e.what());
@@ -669,13 +679,28 @@ private:
             return;
         }
         
-        // Validate velocity range for safety
-        if (requested_velocity > 0 || requested_velocity < -3.0) {
+        // Clamp and validate the velocity:
+        //  - enforce retract direction (negative)
+        //  - allow low speeds, keep bounded for safety
+        if (requested_velocity > 0) {
+            requested_velocity = -requested_velocity;
+        }
+        const double kMinZeroVelocity = 0.005;
+        const double kMaxZeroVelocity = 3.0;
+        if (requested_velocity > 0 || std::fabs(requested_velocity) < kMinZeroVelocity) {
             response->success = false;
-            response->message = "Invalid velocity: must be negative and >= -3.0 rad/s for safety";
+            response->message = "Invalid velocity: must be negative and magnitude >= "
+                                + std::to_string(kMinZeroVelocity) + " rad/s";
             RCLCPP_WARN(this->get_logger(), "Zero request denied: unsafe velocity %.2f", requested_velocity);
             return;
         }
+
+        if (std::abs(requested_velocity) > kMaxZeroVelocity) {
+            requested_velocity = -kMaxZeroVelocity;
+            RCLCPP_WARN(this->get_logger(),
+                "Requested zero velocity capped to %.2f rad/s for safety", requested_velocity);
+        }
+        RCLCPP_INFO(this->get_logger(), "Zeroing will use effective velocity: %.3f rad/s", requested_velocity);
         
         try {
             RCLCPP_INFO(this->get_logger(), "Starting turret zero sequence...");

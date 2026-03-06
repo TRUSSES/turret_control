@@ -16,8 +16,8 @@ SpiralZipper::SpiralZipper(int servo_pwm_pin, int servo_dir_pin, int servo_enc_a
       extension_per_step_(extension_per_step),
       kp_(1.0),  // Higher gain for velocity control (vs 0.15 for PWM control)
       direction_(0),
-      is_zeroing_(false),
-      meters_per_enc_count_(extension_per_step * 4) {
+  is_zeroing_(false),
+  meters_per_enc_count_(extension_per_step * 4) {
   // Additional initialization can be done here if needed.
 }
 
@@ -39,11 +39,26 @@ SpiralZipper::~SpiralZipper() {
 }
 
 void SpiralZipper::Zero() {
-  // Default velocity for zeroing
-  Zero(-0.5);  // rad/s (adjust for your system)
+  // Default velocity for zeroing is intentionally conservative
+  // so we can safely find the hard stop and avoid overshoot.
+  Zero(-0.2);  // rad/s
 }
 
 void SpiralZipper::Zero(double retract_velocity) {
+  constexpr double kMinZeroSpeed = 0.005;   // Allow slower but reliable motion
+  constexpr double kMaxZeroSpeed = 3.0;     // Keep bounded while still allowing tuned settings
+  constexpr double kSettleVelocityThreshold = 0.01;
+
+  // Safety: enforce inward (retracting) motion and clamp to a usable range.
+  if (retract_velocity > 0.0) {
+    retract_velocity = -retract_velocity;
+  }
+  if (std::abs(retract_velocity) < kMinZeroSpeed) {
+    retract_velocity = -kMinZeroSpeed;
+  } else if (std::abs(retract_velocity) > kMaxZeroSpeed) {
+    retract_velocity = -kMaxZeroSpeed;
+  }
+
   // Set zeroing flag to prevent interference from ActuateLength
   is_zeroing_ = true;
   
@@ -56,12 +71,36 @@ void SpiralZipper::Zero(double retract_velocity) {
   servo_motor_.setTargetVelocity(retract_velocity);
   
   std::cout << "Starting spiral zipper zeroing at velocity: " << retract_velocity << " rad/s" << std::endl;
+  int loop_counter = 0;
+
+  // If already at the limit switch before motion starts, avoid unnecessary movement.
+  if (limit_switch_.IsPressed()) {
+    servo_motor_.setTargetVelocity(0);
+    while (std::fabs(servo_motor_.getCurrentVelocity()) > kSettleVelocityThreshold) {
+      servo_motor_.update();
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    zipper_encoder_.ResetCount();
+    is_zeroing_ = false;
+    std::cout << "Limit switch already engaged. Skipping zero travel and resetting encoder." << std::endl;
+    return;
+  }
 
   // Run the control loop until the limit switch signals that zero has been reached.
   while (!limit_switch_.IsPressed()) {
     // Update both motor and encoder during zeroing
     servo_motor_.update();
     zipper_encoder_.Update();
+    int current_count = zipper_encoder_.GetCount();
+    double current_extension = current_count * meters_per_enc_count_;
+    ++loop_counter;
+    if (loop_counter % 50 == 0) {
+      std::cout << "Zeroing debug: encoder_count=" << current_count
+                << ", extension=" << current_extension
+                << ", target?=switch( "
+                << (limit_switch_.IsPressed() ? "pressed" : "not pressed")
+                << ")" << std::endl;
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
@@ -70,12 +109,14 @@ void SpiralZipper::Zero(double retract_velocity) {
   // Once the switch is triggered, stop the motor.
   servo_motor_.setTargetVelocity(0);
   // Allow the motor to settle.
-  while (std::fabs(servo_motor_.getCurrentVelocity()) > 0.01) {
+  while (std::fabs(servo_motor_.getCurrentVelocity()) > kSettleVelocityThreshold) {
     servo_motor_.update();
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   
   std::cout << "Motor stopped, resetting encoder count..." << std::endl;
+  std::cout << "Encoder before reset: count=" << zipper_encoder_.GetCount()
+            << ", extension=" << (zipper_encoder_.GetCount() * meters_per_enc_count_) << std::endl;
   
   // Reset the encoder count after zeroing.
   zipper_encoder_.ResetCount();
@@ -123,6 +164,18 @@ void SpiralZipper::ActuateLength(float goal_dist, double max_velocity) {
   // Velocity-based proportional control
   // Scale the gain appropriately for velocity control (higher than PWM-based)
   double target_velocity = kp_ * error_counts;
+  static int actuate_log_counter = 0;
+  ++actuate_log_counter;
+  if (actuate_log_counter % 25 == 0) {
+    double goal_extension = goal_count * meters_per_enc_count_;
+    double current_extension = current_count * meters_per_enc_count_;
+    std::cout << "ActuateLength debug: goal_count=" << goal_count
+              << ", current_count=" << current_count
+              << ", goal_ext=" << goal_extension
+              << ", current_ext=" << current_extension
+              << ", target_vel=" << target_velocity
+              << ", max_vel=" << max_velocity << std::endl;
+  }
   
   // Add minimum velocity threshold for small errors to ensure movement
   if (std::abs(error_counts) > 5 && std::abs(target_velocity) < 0.1) {

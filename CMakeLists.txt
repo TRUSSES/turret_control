@@ -62,7 +62,6 @@ add_executable(turret_ros2_node
     src/servo_city_motor.cpp
     src/encoder.cpp
     src/limit_switch.cpp
-    src/cubemars_control.cpp
     src/cubemars_pi3hat.cpp
     src/pi3hat.cpp
     src/config.cpp

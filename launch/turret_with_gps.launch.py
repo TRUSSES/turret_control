@@ -25,7 +25,7 @@ def generate_launch_description():
     
     zero_velocity_arg = DeclareLaunchArgument(
         'zero_velocity',
-        default_value='-0.5',
+        default_value='-0.2',
         description='Velocity for zeroing operation (rad/s)'
     )
     
@@ -42,7 +42,6 @@ def generate_launch_description():
     turret_node = Node(
         package='turret_control',
         executable='turret_ros2_node',
-        name='turret_control_node',
         output='both',
         parameters=[
             {
@@ -82,4 +81,3 @@ def generate_launch_description():
         turret_node,
         shutdown_on_exit,
     ])
-

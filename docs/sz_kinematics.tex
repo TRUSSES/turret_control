@@ -1,0 +1,74 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb}
+\usepackage[margin=1in]{geometry}
+
+\title{Turret Pitch Kinematics}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{Geometry}
+\begin{itemize}
+  \item Pulley: \(O = (0,h)\).
+  \item Pivot: \(P = (x,y)\).
+  \item Spiral zipper end \(E\): length \(a\) from \(P\) at pitch angle \(\theta\) (measured from \(+x\)); encoder reading maps via \(\theta = \theta_{\text{enc}} - \theta_0\).
+  \item Spool radius: \(r_s\); cable length \(b = b_0 + r_s\,\varphi_s\) where \(\varphi_s\) is spool angle (rad) and \(b_0\) is the slack length at reference.
+\end{itemize}
+
+Coordinates of \(E\):
+\[
+x_E = x + a\cos\theta, \qquad y_E = y + a\sin\theta.
+\]
+
+Define \(d_x = x_E,\; d_y = y_E - h\). Let \(r = \sqrt{x^2 + (y-h)^2}\) and \(\phi = \operatorname{atan2}(y-h,\; x)\).
+
+\section*{Forward Kinematics (FK)}
+Cable length from pulley to \(E\):
+\[
+b = \sqrt{d_x^2 + d_y^2}
+= \sqrt{(x + a\cos\theta)^2 + \bigl(y + a\sin\theta - h\bigr)^2}
+\]
+or equivalently
+\[
+b^2 = a^2 + r^2 + 2ar\cos(\theta - \phi).
+\]
+
+Spool relation:
+\[
+b = b_0 + r_s\,\varphi_s, \qquad \varphi_s = \frac{b - b_0}{r_s}.
+\]
+
+\section*{Inverse Kinematics (IK)}
+
+\paragraph{Solve for \(\theta\) given \(a, b\):}
+\[
+\cos(\theta - \phi) = \frac{b^2 - a^2 - r^2}{2ar}, \qquad
+\theta = \phi \pm \arccos\!\left(\frac{b^2 - a^2 - r^2}{2ar}\right).
+\]
+Validity: \(\left|\frac{b^2 - a^2 - r^2}{2ar}\right| \le 1\). Choose the branch consistent with the physical assembly.
+
+\paragraph{Solve for \(a\) given \(\theta, b\):}
+Start from \(b^2 = a^2 + r^2 + 2ar\cos(\theta-\phi)\), which gives
+\[
+a = -\,r\cos(\theta-\phi) \;\pm\; \sqrt{\,b^2 - r^2 \sin^2(\theta-\phi)\,}.
+\]
+Take the positive root that yields \(a \ge 0\) and respects mechanical limits.
+
+\section*{Velocity Coupling / Jacobian}
+With \(d_x = x + a\cos\theta\), \(d_y = y + a\sin\theta - h\), and \(b = \sqrt{d_x^2 + d_y^2}\):
+\[
+\frac{\partial b}{\partial a} = \frac{d_x \cos\theta + d_y \sin\theta}{b}, \qquad
+\frac{\partial b}{\partial \theta} = \frac{a\bigl(-d_x \sin\theta + d_y \cos\theta\bigr)}{b}.
+\]
+Therefore,
+\[
+\dot b = \frac{\partial b}{\partial a}\,\dot a \;+\; \frac{\partial b}{\partial \theta}\,\dot \theta,
+\qquad
+\dot \varphi_s = \frac{\dot b}{r_s}.
+\]
+
+\section*{Constants (example from config)}
+For the provided hardware: \(x = 0.14\ \text{m},\; y = 0.065\ \text{m},\; h = 0.25\ \text{m},\; r_s = 0.013\ \text{m}\), so \(r \approx 0.232\ \text{m},\; \phi \approx -53.1^\circ\). The zero-angle offset is \(\theta_0 \approx 63^\circ\) (apply as \(\theta = \theta_{\text{enc}} - \theta_0\)).
+\end{document}

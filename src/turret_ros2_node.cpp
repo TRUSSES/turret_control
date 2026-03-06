@@ -399,26 +399,14 @@ private:
         // Command the spiral zipper to move to desired position with desired velocity
         try {
             if (turret_) {
-                // Convert velocity from m/s to rad/s
-                // The spiral zipper mechanics use: extension = encoder_count * (extension_per_step * 4)
-                // From config: extension_per_step = 0.000004453125, so meters_per_count = 0.000017812500
-                // For a spiral mechanism, we need to convert linear velocity to angular velocity
-                // For now, we'll use the velocity directly as it appears to be in correct units already
-                constexpr double kMinCommandVelocity = 0.05;
-                constexpr double kMaxCommandVelocity = 2.0;
+                // Use coupled SZ + pitch control (no yaw in this mode):
+                // keep current pitch as the target pitch while moving to the requested extension.
+                double desired_pitch_deg = current_pitch_angle_ * 180.0 / M_PI;
                 double max_velocity = std::abs(desired_velocity_);
-
-                if (max_velocity > 0.0) {
-                    if (max_velocity < kMinCommandVelocity) {
-                        max_velocity = kMinCommandVelocity;
-                    } else if (max_velocity > kMaxCommandVelocity) {
-                        max_velocity = kMaxCommandVelocity;
-                    }
-                    turret_->ActuateSpiralZipperLength(desired_length_, max_velocity);
-                } else {
-                    // Fallback to position-only control if no velocity specified
-                    turret_->ActuateSpiralZipperLength(desired_length_);
-                }
+                turret_->ActuateTurretCable(
+                    static_cast<float>(desired_length_),
+                    static_cast<float>(desired_pitch_deg),
+                    static_cast<float>(max_velocity));
 
     // RCLCPP_INFO(this->get_logger(),
     //     "EXECUTING zipper command: length=%.3f meters, max_velocity=%.3f",
@@ -434,15 +422,35 @@ private:
         // Command motors directly with velocity commands
         try {
             if (turret_) {
-                // Log motor commands when non-zero (throttled to avoid spam)
-                if (std::abs(teleop_sz_velocity_) > 0.001 || std::abs(teleop_pitch_velocity_) > 0.001 || std::abs(teleop_yaw_velocity_) > 0.001) {
-                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
-                        "EXEC Teleop: Commanding motors sz=%.3f, pitch=%.3f, yaw=%.3f",
-                        teleop_sz_velocity_, teleop_pitch_velocity_, teleop_yaw_velocity_);
+                bool sz_limit_pressed = turret_->IsSpiralZipperLimitPressed();
+                bool turret_limit_pressed = turret_->IsTurretLimitPressed();
+
+                double effective_sz_velocity = teleop_sz_velocity_;
+                double effective_pitch_velocity = teleop_pitch_velocity_;
+                if (sz_limit_pressed) {
+                    effective_sz_velocity = 0.0;
+                }
+                if (turret_limit_pressed) {
+                    effective_pitch_velocity = 0.0;
                 }
 
-                turret_->SetSpiralZipperVelocity(teleop_sz_velocity_);
-                turret_->SetPitchVelocity(teleop_pitch_velocity_);
+                // Log motor commands when non-zero (throttled to avoid spam)
+                if (std::abs(effective_sz_velocity) > 0.001 ||
+                    std::abs(effective_pitch_velocity) > 0.001 ||
+                    std::abs(teleop_yaw_velocity_) > 0.001) {
+                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                        "EXEC Teleop: Commanding motors sz=%.3f, pitch=%.3f, yaw=%.3f",
+                        effective_sz_velocity, effective_pitch_velocity, teleop_yaw_velocity_);
+                    if (sz_limit_pressed || turret_limit_pressed) {
+                        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 200,
+                            "LIMIT OVERRIDE active in TELEOP: sz_limit=%s turret_limit=%s",
+                            sz_limit_pressed ? "YES" : "NO",
+                            turret_limit_pressed ? "YES" : "NO");
+                    }
+                }
+
+                turret_->SetSpiralZipperVelocity(effective_sz_velocity);
+                turret_->SetPitchVelocity(effective_pitch_velocity);
                 turret_->SetYawVelocity(teleop_yaw_velocity_);
 
                 // Publish velocity commands
@@ -459,9 +467,18 @@ private:
         try {
             if (!turret_) return;
 
+            bool sz_limit_pressed = turret_->IsSpiralZipperLimitPressed();
+            bool turret_limit_pressed = turret_->IsTurretLimitPressed();
+
             // Execute SZ and yaw commands continuously in zero mode.
-            turret_->SetSpiralZipperVelocity(teleop_sz_velocity_);
+            double effective_sz_velocity = sz_limit_pressed ? 0.0 : teleop_sz_velocity_;
+            turret_->SetSpiralZipperVelocity(effective_sz_velocity);
             turret_->SetYawVelocity(teleop_yaw_velocity_);
+
+            if (sz_limit_pressed && std::abs(teleop_sz_velocity_) > 0.001) {
+                RCLCPP_WARN(this->get_logger(),
+                    "TELEOP_ZERO: SZ limit switch pressed -> SZ command forced to 0.0");
+            }
 
             // Publish velocity commands
             publishVelocities();
@@ -485,7 +502,6 @@ private:
             }
 
             // Monitor turret limit switch for zeroing (used to zero pitch encoder)
-            bool turret_limit_pressed = turret_->IsTurretLimitPressed();
 
             // DEBUG: Log pitch zeroing conditions every 2 seconds
             if (!pitch_zeroed_) {
@@ -494,9 +510,10 @@ private:
                     turret_limit_pressed ? "YES" : "NO", teleop_pitch_velocity_);
             }
 
+            double effective_pitch_velocity = turret_limit_pressed ? 0.0 : teleop_pitch_velocity_;
             if (!pitch_zeroed_ && turret_limit_pressed) {
                 // Stop pitch whenever turret limit switch is pressed.
-                turret_->SetPitchVelocity(0.0);
+                turret_->SetPitchVelocity(effective_pitch_velocity);
 
                 // Only accept pitch zero when SZ has already completed zeroing.
                 if (sz_zeroed_) {
@@ -508,7 +525,7 @@ private:
             } else {
                 // If switch is not pressed, keep following the requested pitch command.
                 // This also re-activates motion after a release during zeroing.
-                turret_->SetPitchVelocity(teleop_pitch_velocity_);
+                turret_->SetPitchVelocity(effective_pitch_velocity);
             }
 
             // Yaw zeroing is triggered manually by user when in desired position

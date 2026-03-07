@@ -87,6 +87,7 @@ class Turret {
   const double jacobian_damping_ = 0.02;
 
   double GetPitchCableLength() const;
+  void CapturePitchCableReferenceAtCurrentPose();
   double ComputeCableLength(float extension, double pitch_angle_rad) const;
   void ComputeCableLengthJacobian(float extension,
                                  double pitch_angle_rad,

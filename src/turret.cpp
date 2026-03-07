@@ -112,6 +112,19 @@ double Turret::GetPitchCableLength() const {
          (pitch_motor_->getPosition() - pitch_motor_length_zero_angle_rad_) * pitch_motor_radius_m_;
 }
 
+void Turret::CapturePitchCableReferenceAtCurrentPose() {
+  if (!pitch_motor_) {
+    return;
+  }
+
+  turret_encoder_.Update();
+  spiral_zipper_.UpdateEncoder();
+  pitch_motor_length_zero_angle_rad_ = pitch_motor_->getPosition();
+  pitch_motor_cable_zero_length_m_ = ComputeCableLength(
+      static_cast<float>(spiral_zipper_.GetExtension()),
+      ToKinematicPitchAngle(GetPitchAngle()));
+}
+
 bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float max_zipper_velocity,
                                 bool hold_pitch) {
   if (!pitch_motor_) {
@@ -125,14 +138,7 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
 
   double zipper_extension = spiral_zipper_.GetExtension();
   const bool sz_limit_pressed = spiral_zipper_.IsLimitSwitchPressed();
-  static bool last_sz_limit_pressed = false;
-  if (sz_limit_pressed) {
-    if (!last_sz_limit_pressed) {
-      std::cout << "ActuateTurretCable: Spiral zipper limit switch active -> stopping zipper motor." << std::endl;
-    }
-    spiral_zipper_.Stop();
-  }
-  last_sz_limit_pressed = sz_limit_pressed;
+  static bool last_sz_limit_blocked = false;
 
   const bool turret_limit_pressed = turret_limit_switch_.IsPressed();
   static bool last_turret_limit_pressed = false;
@@ -153,12 +159,28 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
 
   constexpr double kMinCommandVelocity = 0.03;
   constexpr double kMaxCommandVelocity = 2.0;
+  constexpr double kPitchLagSlowStart = 0.08726646259971647;   // 5 deg
+  constexpr double kPitchLagSlowFull = 0.3490658503988659;     // 20 deg
+  constexpr double kPitchLagMinZipperScale = 0.35;
   double zipper_velocity = std::abs(max_zipper_velocity);
   if (zipper_velocity <= 0.0) {
     zipper_velocity = kMaxCommandVelocity;
   } else {
     zipper_velocity = std::clamp(zipper_velocity, kMinCommandVelocity, kMaxCommandVelocity);
   }
+
+  double zipper_velocity_scale = 1.0;
+  const double pitch_error_mag = std::fabs(pitch_error);
+  if (pitch_error_mag > kPitchLagSlowStart) {
+    const double blend = std::clamp(
+        (pitch_error_mag - kPitchLagSlowStart) /
+            (kPitchLagSlowFull - kPitchLagSlowStart),
+        0.0,
+        1.0);
+    zipper_velocity_scale = 1.0 - blend * (1.0 - kPitchLagMinZipperScale);
+  }
+  zipper_velocity *= zipper_velocity_scale;
+  zipper_velocity = std::clamp(zipper_velocity, kMinCommandVelocity, kMaxCommandVelocity);
 
   // Extension command -> desired zipper speed (m/s), then map to coupled cable dynamics.
   double zipper_velocity_ref = std::clamp(
@@ -171,14 +193,23 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
     zipper_velocity_ref = (zipper_velocity_ref >= 0.0) ? kMinCommandVelocity : -kMinCommandVelocity;
   }
 
-  if (!sz_limit_pressed) {
-    spiral_zipper_.ActuateLength(goal_dist, zipper_velocity);
+  const bool sz_limit_blocks_retraction = sz_limit_pressed && zipper_velocity_ref < 0.0;
+  if (sz_limit_blocks_retraction && !last_sz_limit_blocked) {
+    std::cout << "ActuateTurretCable: Spiral zipper limit switch active -> blocking negative zipper motion."
+              << std::endl;
   }
+  last_sz_limit_blocked = sz_limit_blocks_retraction;
+
+  spiral_zipper_.ActuateLength(goal_dist, zipper_velocity);
 
   // Velocity-level coupled control using the Jacobian:
   //   dc/dt = dc/dz * dz/dt + dc/dtheta * dtheta/dt
   constexpr double kCouplingDeadband = 0.002;
   constexpr double kPitchHoldDeadband = 0.008726646259971648;  // 0.5 deg
+  constexpr double kPitchPriorityError = 0.17453292519943295;  // 10 deg
+  constexpr double kPitchPriorityFraction = 0.6;
+  constexpr double kPitchNoReverseError = 0.03490658503988659;  // 2 deg
+  constexpr double kPitchNoReverseFraction = 0.25;
   constexpr double kSmallPitchCmd = 0.005;
   double desired_cable_velocity = std::clamp(
       cable_kp_ * cable_error,
@@ -188,7 +219,10 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   double coupling_pitch_cmd = 0.0;
   const double zipper_error_reached = std::fabs(zipper_error) <= kCouplingDeadband;
   const double cable_error_reached = std::fabs(cable_error) <= 0.005;
-  if (!turret_limit_pressed && std::fabs(desired_cable_velocity) > kSmallPitchCmd) {
+  const bool use_pitch_coupling =
+      !turret_limit_pressed &&
+      !zipper_error_reached;
+  if (use_pitch_coupling && std::fabs(desired_cable_velocity) > kSmallPitchCmd) {
     const double coupling_numerator = desired_cable_velocity - dc_dz * zipper_velocity_ref;
     const double jacobian_scale = dc_dpitch * dc_dpitch + jacobian_damping_ * jacobian_damping_;
     if (jacobian_scale > 0.0) {
@@ -205,6 +239,22 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
       coupling_pitch_cmd + pitch_feedback_cmd,
       -max_omega_rad_,
       max_omega_rad_);
+
+  if (std::fabs(pitch_error) > kPitchPriorityError &&
+      std::fabs(pitch_feedback_cmd) > kSmallPitchCmd) {
+    const double min_tracking_velocity = kPitchPriorityFraction * pitch_feedback_cmd;
+    if (pitch_feedback_cmd > 0.0) {
+      desired_pitch_motor_velocity = std::max(desired_pitch_motor_velocity, min_tracking_velocity);
+    } else {
+      desired_pitch_motor_velocity = std::min(desired_pitch_motor_velocity, min_tracking_velocity);
+    }
+  }
+
+  if (std::fabs(pitch_error) > kPitchNoReverseError &&
+      std::fabs(pitch_feedback_cmd) > kSmallPitchCmd &&
+      desired_pitch_motor_velocity * pitch_feedback_cmd < 0.0) {
+    desired_pitch_motor_velocity = kPitchNoReverseFraction * pitch_feedback_cmd;
+  }
 
   // The pitch limit switch is only a stop in the direction that drove into it during zeroing.
   if (turret_limit_pressed && desired_pitch_motor_velocity < 0.0) {
@@ -329,8 +379,7 @@ bool Turret::ZeroTurret(double retract_velocity, double pitch_velocity_ratio) {
         pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
         if (sz_zeroed) {
           pitch_encoder_zero_angle_rad_ = GetRawTurretEncoderAngle();
-          pitch_motor_length_zero_angle_rad_ = pitch_motor_->getPosition();
-          pitch_motor_cable_zero_length_m_ = ComputeCableLength(0.0f, ToKinematicPitchAngle(GetPitchAngle()));
+          CapturePitchCableReferenceAtCurrentPose();
           pitch_zeroed = true;
           waiting_for_sz_after_pitch_limit = false;
           std::cout << "Turret limit switch pressed and SZ already zeroed: capturing turret angle reference"
@@ -371,6 +420,58 @@ bool Turret::ZeroTurret(double retract_velocity, double pitch_velocity_ratio) {
 
   spiral_zipper_.Stop();
   pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
+
+  constexpr double kBackoffExtensionMeters = 0.015;
+  constexpr double kBackoffPitchRadians = 0.13962634015954636;  // 8 deg
+  constexpr auto kBackoffTimeout = std::chrono::seconds(5);
+  const double backoff_zipper_velocity = std::clamp(std::abs(retract_velocity), 0.2, 1.5);
+  const double backoff_pitch_velocity = std::clamp(std::abs(pitch_velocity) * 0.5, 0.20, 0.80);
+  const auto backoff_deadline = std::chrono::steady_clock::now() + kBackoffTimeout;
+
+  while (std::chrono::steady_clock::now() < backoff_deadline) {
+    turret_encoder_.Update();
+    spiral_zipper_.UpdateEncoder();
+    spiral_zipper_.UpdateMotor();
+
+    const bool turret_limit_pressed = turret_limit_switch_.IsPressed();
+    const bool sz_limit_pressed = spiral_zipper_.IsLimitSwitchPressed();
+    const double current_pitch_angle = GetPitchAngle();
+    const double current_extension = spiral_zipper_.GetExtension();
+
+    const bool need_pitch_backoff = turret_limit_pressed || current_pitch_angle < kBackoffPitchRadians;
+    const bool need_sz_backoff = sz_limit_pressed || current_extension < kBackoffExtensionMeters;
+
+    if (!need_pitch_backoff && !need_sz_backoff) {
+      break;
+    }
+
+    if (need_pitch_backoff) {
+      pitch_motor_->sendCommandMITMode(0.0, backoff_pitch_velocity, 0.0, 0.3, 0.0);
+    } else {
+      pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.3, 0.0);
+    }
+
+    if (need_sz_backoff) {
+      spiral_zipper_.SetMotorVelocity(backoff_zipper_velocity);
+    } else {
+      spiral_zipper_.Stop();
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  spiral_zipper_.Stop();
+  pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
+
+  turret_encoder_.Update();
+  spiral_zipper_.UpdateEncoder();
+  CapturePitchCableReferenceAtCurrentPose();
+  std::cout << "ZeroTurret backoff complete: pitch="
+            << (GetPitchAngle() * 180.0 / M_PI) << " deg, ext="
+            << spiral_zipper_.GetExtension() << " m, turret_limit="
+            << (turret_limit_switch_.IsPressed() ? "YES" : "NO")
+            << ", sz_limit=" << (spiral_zipper_.IsLimitSwitchPressed() ? "YES" : "NO")
+            << std::endl;
 
   return true;
 }
@@ -452,11 +553,7 @@ void Turret::StopAllMotors() {
 void Turret::ZeroPitchEncoder() {
   // Capture turret encoder reference at the current limit-switch angle.
   pitch_encoder_zero_angle_rad_ = GetRawTurretEncoderAngle();
-  if (pitch_motor_) {
-    pitch_motor_length_zero_angle_rad_ = pitch_motor_->getPosition();
-    pitch_motor_cable_zero_length_m_ = ComputeCableLength(
-        0.0f, ToKinematicPitchAngle(GetPitchAngle()));
-  }
+  CapturePitchCableReferenceAtCurrentPose();
   std::cout << "DEBUG: Pitch encoder reference captured at "
             << pitch_encoder_zero_angle_rad_ * 180.0 / M_PI << " deg" << std::endl;
 }

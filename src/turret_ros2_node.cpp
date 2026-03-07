@@ -378,8 +378,13 @@ private:
                     sz_zeroed_ = true;
                     pitch_zeroed_ = true;
                     current_state_ = TurretState::READY;
-                    current_extension_ = 0.0;
+                    current_extension_ = turret_->GetSpiralZipperExtension();
                     current_velocity_ = 0.0;
+                    current_pitch_angle_ = turret_->GetPitchAngle();
+                    desired_length_ = current_extension_;
+                    desired_velocity_ = 0.0;
+                    desired_pitch_angle_ = current_pitch_angle_;
+                    hold_current_pitch_ = true;
                     RCLCPP_INFO(this->get_logger(), "Turret zeroing completed successfully! State changed to READY");
                 } else {
                     RCLCPP_ERROR(this->get_logger(), "Turret zeroing failed! Returning to IDLE state");
@@ -431,7 +436,7 @@ private:
 
                 double effective_sz_velocity = teleop_sz_velocity_;
                 double effective_pitch_velocity = teleop_pitch_velocity_;
-                if (sz_limit_pressed) {
+                if (sz_limit_pressed && effective_sz_velocity < 0.0) {
                     effective_sz_velocity = 0.0;
                 }
                 if (turret_limit_pressed && effective_pitch_velocity < 0.0) {
@@ -447,7 +452,7 @@ private:
                         effective_sz_velocity, effective_pitch_velocity, teleop_yaw_velocity_);
                     if (sz_limit_pressed || turret_limit_pressed) {
                         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                            "LIMIT OVERRIDE active in TELEOP: sz_limit=%s turret_limit=%s (pitch only blocks negative motion)",
+                            "LIMIT OVERRIDE active in TELEOP: sz_limit=%s turret_limit=%s (SZ/pitch only block negative motion)",
                             sz_limit_pressed ? "YES" : "NO",
                             turret_limit_pressed ? "YES" : "NO");
                     }

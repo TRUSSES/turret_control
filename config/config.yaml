@@ -33,6 +33,10 @@ yaw_motor:
 x_offset: 0.14
 # y_offset is expected as (y - h) from the kinematics docs.
 y_offset: -0.185
-pitch_angle_offset_deg: 63.0
+# User-facing pitch commands are positive when pitching down.
+# The kinematics model uses the opposite sign convention from docs/main.tex.
+pitch_kinematics_sign: -1.0
+#pitch_angle_offset_deg: 63.0
+pitch_angle_offset_deg: 0.0
 
 turret_id: 1

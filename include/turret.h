@@ -16,7 +16,8 @@ class Turret {
   ~Turret();
 
   void Init();
-  bool ActuateTurretCable(float goal_dist, float desired_pitch_deg, float max_zipper_velocity);
+  bool ActuateTurretCable(float goal_dist, float desired_pitch_rad, float max_zipper_velocity,
+                         bool hold_pitch = false);
   void Update();
   
   // Spiral zipper control methods for ROS2 integration
@@ -69,22 +70,31 @@ class Turret {
 
   float x_offset_;
   float y_offset_;
+  double pitch_encoder_scale_rad_per_count_;
+  double pitch_encoder_sign_;
+  double pitch_kinematics_sign_;
   double pitch_encoder_zero_angle_rad_;
   double pitch_angle_offset_rad_;
   double pitch_motor_length_zero_angle_rad_;
   double pitch_motor_cable_zero_length_m_;
 
   const double cable_kp_ = 1.2;
+  const double pitch_kp_ = 2.0;
   const double pitch_motor_radius_m_ = 0.013;
   const double max_omega_rad_ = 2.0;
-
-  // Pitch encoder scale (radians per count)
-  static constexpr double kPitchAngleScale = 2.0 * 3.14159265359 / 1024.0;
+  const double max_zipper_rate_coupled_ = 2.0;
+  const double pitch_coupling_gain_ = 0.35;
+  const double jacobian_damping_ = 0.02;
 
   double GetPitchCableLength() const;
   double ComputeCableLength(float extension, double pitch_angle_rad) const;
+  void ComputeCableLengthJacobian(float extension,
+                                 double pitch_angle_rad,
+                                 double &dc_dz,
+                                 double &dc_dtheta) const;
 
   double GetRawTurretEncoderAngle() const;
+  double ToKinematicPitchAngle(double pitch_angle_rad) const;
 };
 
 #endif  // TURRET_H_

@@ -94,18 +94,13 @@ void SpiralZipper::Zero(double retract_velocity) {
     int current_count = zipper_encoder_.GetCount();
     double current_extension = current_count * meters_per_enc_count_;
     ++loop_counter;
-    if (loop_counter % 50 == 0) {
-      std::cout << "Zeroing debug: encoder_count=" << current_count
-                << ", extension=" << current_extension
-                << ", target?=switch( "
-                << (limit_switch_.IsPressed() ? "pressed" : "not pressed")
-                << ")" << std::endl;
+    if (loop_counter % 100 == 0) {
+      std::cout << "Spiral zipper zeroing: encoder_count=" << current_count
+                << ", extension=" << current_extension << " m" << std::endl;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
-  std::cout << "Limit switch pressed, stopping motor..." << std::endl;
-  
   // Once the switch is triggered, stop the motor.
   servo_motor_.setTargetVelocity(0);
   // Allow the motor to settle.
@@ -114,9 +109,9 @@ void SpiralZipper::Zero(double retract_velocity) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   
-  std::cout << "Motor stopped, resetting encoder count..." << std::endl;
-  std::cout << "Encoder before reset: count=" << zipper_encoder_.GetCount()
-            << ", extension=" << (zipper_encoder_.GetCount() * meters_per_enc_count_) << std::endl;
+  std::cout << "Spiral zipper zero switch reached at count=" << zipper_encoder_.GetCount()
+            << ", extension=" << (zipper_encoder_.GetCount() * meters_per_enc_count_) << " m. Resetting encoder."
+            << std::endl;
   
   // Reset the encoder count after zeroing.
   zipper_encoder_.ResetCount();
@@ -166,13 +161,12 @@ void SpiralZipper::ActuateLength(float goal_dist, double max_velocity) {
   double target_velocity = kp_ * error_counts;
   static int actuate_log_counter = 0;
   ++actuate_log_counter;
-  if (actuate_log_counter % 25 == 0) {
+  if (actuate_log_counter % 100 == 0 && std::abs(error_counts) > 200) {
     double goal_extension = goal_count * meters_per_enc_count_;
     double current_extension = current_count * meters_per_enc_count_;
-    std::cout << "ActuateLength debug: goal_count=" << goal_count
-              << ", current_count=" << current_count
-              << ", goal_ext=" << goal_extension
-              << ", current_ext=" << current_extension
+    std::cout << "SpiralZipper ActuateLength: goal_ext=" << goal_extension
+              << " m, current_ext=" << current_extension
+              << " m, error_counts=" << error_counts
               << ", target_vel=" << target_velocity
               << ", max_vel=" << max_velocity << std::endl;
   }

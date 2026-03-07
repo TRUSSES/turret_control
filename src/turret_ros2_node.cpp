@@ -116,6 +116,8 @@ public:
         current_velocity_ = 0.0;
         desired_length_ = 0.0;  // Initialize to prevent oscillation
         desired_velocity_ = 0.0;  // Initialize to prevent oscillation
+        desired_pitch_angle_ = 0.0;
+        hold_current_pitch_ = true;
         // Keep a conservative internal default for spiral zipper zeroing.
         // Actual runtime value comes from the "zero_velocity" parameter.
         zero_velocity_ = -0.2;
@@ -223,6 +225,8 @@ private:
     double current_velocity_;
     double desired_length_;
     double desired_velocity_;
+    double desired_pitch_angle_;
+    bool hold_current_pitch_;
     double zero_velocity_;
     std::future<bool> zero_future_;
 
@@ -387,7 +391,7 @@ private:
             } else {
                 // Still zeroing - log progress occasionally
                 static int counter = 0;
-                if (++counter % 100 == 0) {  // Log every ~1 second (at 100Hz update rate)
+                if (++counter % 500 == 0) {  // Log every ~5 seconds (at 100Hz update rate)
                     RCLCPP_INFO(this->get_logger(), "Zeroing in progress...");
                 }
             }
@@ -399,14 +403,14 @@ private:
         // Command the spiral zipper to move to desired position with desired velocity
         try {
             if (turret_) {
-                // Use coupled SZ + pitch control (no yaw in this mode):
-                // keep current pitch as the target pitch while moving to the requested extension.
-                double desired_pitch_deg = current_pitch_angle_ * 180.0 / M_PI;
+                // desired_pitch_angle_ is frozen when the command is accepted.
+                double desired_pitch = desired_pitch_angle_;
                 double max_velocity = std::abs(desired_velocity_);
                 turret_->ActuateTurretCable(
                     static_cast<float>(desired_length_),
-                    static_cast<float>(desired_pitch_deg),
-                    static_cast<float>(max_velocity));
+                    static_cast<float>(desired_pitch),
+                    static_cast<float>(max_velocity),
+                    hold_current_pitch_);
 
     // RCLCPP_INFO(this->get_logger(),
     //     "EXECUTING zipper command: length=%.3f meters, max_velocity=%.3f",
@@ -430,7 +434,7 @@ private:
                 if (sz_limit_pressed) {
                     effective_sz_velocity = 0.0;
                 }
-                if (turret_limit_pressed) {
+                if (turret_limit_pressed && effective_pitch_velocity < 0.0) {
                     effective_pitch_velocity = 0.0;
                 }
 
@@ -438,12 +442,12 @@ private:
                 if (std::abs(effective_sz_velocity) > 0.001 ||
                     std::abs(effective_pitch_velocity) > 0.001 ||
                     std::abs(teleop_yaw_velocity_) > 0.001) {
-                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                         "EXEC Teleop: Commanding motors sz=%.3f, pitch=%.3f, yaw=%.3f",
                         effective_sz_velocity, effective_pitch_velocity, teleop_yaw_velocity_);
                     if (sz_limit_pressed || turret_limit_pressed) {
-                        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 200,
-                            "LIMIT OVERRIDE active in TELEOP: sz_limit=%s turret_limit=%s",
+                        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                            "LIMIT OVERRIDE active in TELEOP: sz_limit=%s turret_limit=%s (pitch only blocks negative motion)",
                             sz_limit_pressed ? "YES" : "NO",
                             turret_limit_pressed ? "YES" : "NO");
                     }
@@ -476,7 +480,7 @@ private:
             turret_->SetYawVelocity(teleop_yaw_velocity_);
 
             if (sz_limit_pressed && std::abs(teleop_sz_velocity_) > 0.001) {
-                RCLCPP_WARN(this->get_logger(),
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                     "TELEOP_ZERO: SZ limit switch pressed -> SZ command forced to 0.0");
             }
 
@@ -489,7 +493,7 @@ private:
 
             // DEBUG: Log SZ zeroing conditions every 2 seconds
             if (!sz_zeroed_) {
-                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                     "TELEOP_ZERO: SZ zeroing - extension=%.4f, sz_vel=%.3f",
                     current_extension_, teleop_sz_velocity_);
             }
@@ -505,7 +509,7 @@ private:
 
             // DEBUG: Log pitch zeroing conditions every 2 seconds
             if (!pitch_zeroed_) {
-                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                     "TELEOP_ZERO: Pitch zeroing (turret switch) - limit_pressed=%s, pitch_vel=%.3f",
                     turret_limit_pressed ? "YES" : "NO", teleop_pitch_velocity_);
             }
@@ -653,8 +657,9 @@ private:
     void zipperCommandCallback(const turret_control::msg::ZipperCommand::SharedPtr msg)
     {
         RCLCPP_INFO(this->get_logger(),
-            "ZIPPER COMMAND RECEIVED: length=%.3f, velocity=%.3f",
-            msg->desired_length, msg->desired_velocity);
+            "ZIPPER COMMAND RECEIVED: length=%.3f, velocity=%.3f, desired_pitch=%.3f rad, hold_pitch=%s",
+            msg->desired_length, msg->desired_velocity, msg->desired_pitch_angle,
+            msg->hold_current_pitch ? "true" : "false");
 
         if (current_state_ != TurretState::RUNNING) {
             RCLCPP_WARN(this->get_logger(),
@@ -671,10 +676,25 @@ private:
 
         desired_length_ = msg->desired_length;
         desired_velocity_ = msg->desired_velocity;
+        desired_pitch_angle_ = msg->desired_pitch_angle;
+        hold_current_pitch_ = msg->hold_current_pitch;
+        if (!hold_current_pitch_ && std::abs(desired_pitch_angle_) > (2.0 * M_PI)) {
+            RCLCPP_WARN(this->get_logger(),
+                "Requested pitch %.3f rad exceeds one full turn. This interface expects radians; 10 deg should be 0.1745 rad.",
+                desired_pitch_angle_);
+        }
+        // Backward compatibility with older publishers that only send length/velocity:
+        // treat missing/zero pitch input as "hold current pitch".
+        if (!hold_current_pitch_ && std::abs(desired_pitch_angle_) < 1e-9) {
+            hold_current_pitch_ = true;
+        }
+        if (hold_current_pitch_) {
+            desired_pitch_angle_ = current_pitch_angle_;
+        }
 
         RCLCPP_INFO(this->get_logger(),
-            "Zipper command accepted: length=%.3f, velocity=%.3f",
-            desired_length_, desired_velocity_);
+            "Zipper command accepted: length=%.3f, velocity=%.3f, desired_pitch=%.3f rad, hold_pitch=%s",
+            desired_length_, desired_velocity_, desired_pitch_angle_, hold_current_pitch_ ? "true" : "false");
     }
 
     void teleopCommandCallback(const turret_control::msg::TurretTeleopCommand::SharedPtr msg)

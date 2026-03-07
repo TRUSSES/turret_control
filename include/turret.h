@@ -6,6 +6,7 @@
 #include "limit_switch.h"
 #include "spiral_zipper.h"
 #include <yaml-cpp/yaml.h>
+#include <chrono>
 #include <memory>
 
 class Turret {
@@ -88,6 +89,17 @@ class Turret {
 
   double GetPitchCableLength() const;
   void CapturePitchCableReferenceAtCurrentPose();
+  void ResetCoordinatedTrajectory(double current_extension, double current_pitch_angle);
+  void UpdateCoordinatedTrajectory(double goal_extension,
+                                  double goal_pitch_angle,
+                                  double max_zipper_velocity,
+                                  bool hold_pitch,
+                                  double current_extension,
+                                  double current_pitch_angle,
+                                  double &ref_extension,
+                                  double &ref_pitch_angle,
+                                  double &ref_extension_velocity,
+                                  double &ref_pitch_velocity);
   double ComputeCableLength(float extension, double pitch_angle_rad) const;
   void ComputeCableLengthJacobian(float extension,
                                  double pitch_angle_rad,
@@ -96,6 +108,25 @@ class Turret {
 
   double GetRawTurretEncoderAngle() const;
   double ToKinematicPitchAngle(double pitch_angle_rad) const;
+
+  bool coordinated_trajectory_active_ = false;
+  bool coordinated_trajectory_initialized_ = false;
+  bool coordinated_trajectory_hold_pitch_ = false;
+  double coordinated_trajectory_start_extension_m_ = 0.0;
+  double coordinated_trajectory_goal_extension_m_ = 0.0;
+  double coordinated_trajectory_ref_extension_m_ = 0.0;
+  double coordinated_trajectory_start_pitch_rad_ = 0.0;
+  double coordinated_trajectory_goal_pitch_rad_ = 0.0;
+  double coordinated_trajectory_ref_pitch_rad_ = 0.0;
+  double coordinated_trajectory_ref_extension_velocity_mps_ = 0.0;
+  double coordinated_trajectory_ref_pitch_velocity_radps_ = 0.0;
+  double coordinated_trajectory_duration_s_ = 0.0;
+  double coordinated_trajectory_progress_ = 1.0;
+  double estimated_zipper_speed_mps_ = 0.04;
+  double last_extension_sample_m_ = 0.0;
+  bool have_last_extension_sample_ = false;
+  std::chrono::steady_clock::time_point coordinated_trajectory_last_update_;
+  std::chrono::steady_clock::time_point last_extension_sample_time_;
 };
 
 #endif  // TURRET_H_

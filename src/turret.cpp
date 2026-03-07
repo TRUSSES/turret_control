@@ -112,6 +112,23 @@ double Turret::GetPitchCableLength() const {
          (pitch_motor_->getPosition() - pitch_motor_length_zero_angle_rad_) * pitch_motor_radius_m_;
 }
 
+void Turret::ResetCoordinatedTrajectory(double current_extension, double current_pitch_angle) {
+  coordinated_trajectory_active_ = false;
+  coordinated_trajectory_initialized_ = true;
+  coordinated_trajectory_hold_pitch_ = false;
+  coordinated_trajectory_start_extension_m_ = current_extension;
+  coordinated_trajectory_goal_extension_m_ = current_extension;
+  coordinated_trajectory_ref_extension_m_ = current_extension;
+  coordinated_trajectory_start_pitch_rad_ = current_pitch_angle;
+  coordinated_trajectory_goal_pitch_rad_ = current_pitch_angle;
+  coordinated_trajectory_ref_pitch_rad_ = current_pitch_angle;
+  coordinated_trajectory_ref_extension_velocity_mps_ = 0.0;
+  coordinated_trajectory_ref_pitch_velocity_radps_ = 0.0;
+  coordinated_trajectory_duration_s_ = 0.0;
+  coordinated_trajectory_progress_ = 1.0;
+  coordinated_trajectory_last_update_ = std::chrono::steady_clock::now();
+}
+
 void Turret::CapturePitchCableReferenceAtCurrentPose() {
   if (!pitch_motor_) {
     return;
@@ -123,6 +140,136 @@ void Turret::CapturePitchCableReferenceAtCurrentPose() {
   pitch_motor_cable_zero_length_m_ = ComputeCableLength(
       static_cast<float>(spiral_zipper_.GetExtension()),
       ToKinematicPitchAngle(GetPitchAngle()));
+}
+
+void Turret::UpdateCoordinatedTrajectory(double goal_extension,
+                                         double goal_pitch_angle,
+                                         double max_zipper_velocity,
+                                         bool hold_pitch,
+                                         double current_extension,
+                                         double current_pitch_angle,
+                                         double &ref_extension,
+                                         double &ref_pitch_angle,
+                                         double &ref_extension_velocity,
+                                         double &ref_pitch_velocity) {
+  constexpr double kGoalResetExtensionTol = 1e-4;
+  constexpr double kGoalResetPitchTol = 1e-4;
+  constexpr double kMinTrajectoryDuration = 0.05;
+  constexpr double kMinEstimatedZipperRate = 0.01;
+  constexpr double kNominalZipperVelocityCommand = 1.5;
+  constexpr double kMaxPitchReferenceRate = 0.6;
+
+  const auto now = std::chrono::steady_clock::now();
+  if (!have_last_extension_sample_) {
+    have_last_extension_sample_ = true;
+    last_extension_sample_m_ = current_extension;
+    last_extension_sample_time_ = now;
+  } else {
+    const double dt_sample = std::chrono::duration<double>(now - last_extension_sample_time_).count();
+    if (dt_sample > 1e-3) {
+      const double measured_extension_rate = std::fabs(current_extension - last_extension_sample_m_) / dt_sample;
+      if (measured_extension_rate > 1e-4) {
+        estimated_zipper_speed_mps_ =
+            0.8 * estimated_zipper_speed_mps_ + 0.2 * measured_extension_rate;
+      }
+      last_extension_sample_m_ = current_extension;
+      last_extension_sample_time_ = now;
+    }
+  }
+
+  const bool goal_changed =
+      !coordinated_trajectory_initialized_ ||
+      hold_pitch != coordinated_trajectory_hold_pitch_ ||
+      std::fabs(goal_extension - coordinated_trajectory_goal_extension_m_) > kGoalResetExtensionTol ||
+      std::fabs(goal_pitch_angle - coordinated_trajectory_goal_pitch_rad_) > kGoalResetPitchTol;
+
+  if (goal_changed) {
+    const double extension_delta = goal_extension - current_extension;
+    const double pitch_delta = goal_pitch_angle - current_pitch_angle;
+    const double zipper_velocity_scale = std::clamp(
+        std::fabs(max_zipper_velocity) / kNominalZipperVelocityCommand,
+        0.25,
+        2.0);
+    const double effective_zipper_rate =
+        std::max(kMinEstimatedZipperRate, estimated_zipper_speed_mps_ * zipper_velocity_scale);
+    const double extension_duration = std::fabs(extension_delta) / effective_zipper_rate;
+    const double pitch_duration = std::fabs(pitch_delta) / kMaxPitchReferenceRate;
+
+    coordinated_trajectory_active_ = true;
+    coordinated_trajectory_hold_pitch_ = hold_pitch;
+    coordinated_trajectory_start_extension_m_ = current_extension;
+    coordinated_trajectory_goal_extension_m_ = goal_extension;
+    coordinated_trajectory_ref_extension_m_ = current_extension;
+    coordinated_trajectory_start_pitch_rad_ = current_pitch_angle;
+    coordinated_trajectory_goal_pitch_rad_ = goal_pitch_angle;
+    coordinated_trajectory_ref_pitch_rad_ = current_pitch_angle;
+    coordinated_trajectory_ref_extension_velocity_mps_ = 0.0;
+    coordinated_trajectory_ref_pitch_velocity_radps_ = 0.0;
+    coordinated_trajectory_duration_s_ =
+        std::max({kMinTrajectoryDuration, extension_duration, pitch_duration});
+    coordinated_trajectory_progress_ = 0.0;
+    coordinated_trajectory_initialized_ = true;
+    coordinated_trajectory_last_update_ = now;
+  }
+
+  if (!coordinated_trajectory_active_) {
+    ref_extension = coordinated_trajectory_goal_extension_m_;
+    ref_pitch_angle = coordinated_trajectory_goal_pitch_rad_;
+    ref_extension_velocity = 0.0;
+    ref_pitch_velocity = 0.0;
+    return;
+  }
+
+  double dt = std::chrono::duration<double>(now - coordinated_trajectory_last_update_).count();
+  coordinated_trajectory_last_update_ = now;
+  dt = std::clamp(dt, 1e-3, 0.1);
+
+  const double total_extension_delta =
+      coordinated_trajectory_goal_extension_m_ - coordinated_trajectory_start_extension_m_;
+  const double total_pitch_delta =
+      coordinated_trajectory_goal_pitch_rad_ - coordinated_trajectory_start_pitch_rad_;
+
+  const bool extension_done = std::fabs(total_extension_delta) <= kGoalResetExtensionTol;
+  const bool pitch_done = std::fabs(total_pitch_delta) <= kGoalResetPitchTol;
+  if (extension_done && pitch_done) {
+    coordinated_trajectory_ref_extension_m_ = coordinated_trajectory_goal_extension_m_;
+    coordinated_trajectory_ref_pitch_rad_ = coordinated_trajectory_goal_pitch_rad_;
+    coordinated_trajectory_ref_extension_velocity_mps_ = 0.0;
+    coordinated_trajectory_ref_pitch_velocity_radps_ = 0.0;
+    coordinated_trajectory_progress_ = 1.0;
+    coordinated_trajectory_active_ = false;
+  } else {
+    const double previous_progress = coordinated_trajectory_progress_;
+    coordinated_trajectory_progress_ = std::min(
+        1.0,
+        coordinated_trajectory_progress_ + dt / std::max(kMinTrajectoryDuration, coordinated_trajectory_duration_s_));
+    const double progress_step = coordinated_trajectory_progress_ - previous_progress;
+
+    coordinated_trajectory_ref_extension_m_ =
+        coordinated_trajectory_start_extension_m_ + coordinated_trajectory_progress_ * total_extension_delta;
+    coordinated_trajectory_ref_pitch_rad_ =
+        coordinated_trajectory_start_pitch_rad_ + coordinated_trajectory_progress_ * total_pitch_delta;
+    coordinated_trajectory_ref_extension_velocity_mps_ = (progress_step * total_extension_delta) / dt;
+    coordinated_trajectory_ref_pitch_velocity_radps_ = (progress_step * total_pitch_delta) / dt;
+
+    if (coordinated_trajectory_progress_ >= 1.0 ||
+        (std::fabs(coordinated_trajectory_goal_extension_m_ - coordinated_trajectory_ref_extension_m_) <=
+             kGoalResetExtensionTol &&
+         std::fabs(coordinated_trajectory_goal_pitch_rad_ - coordinated_trajectory_ref_pitch_rad_) <=
+             kGoalResetPitchTol)) {
+      coordinated_trajectory_ref_extension_m_ = coordinated_trajectory_goal_extension_m_;
+      coordinated_trajectory_ref_pitch_rad_ = coordinated_trajectory_goal_pitch_rad_;
+      coordinated_trajectory_ref_extension_velocity_mps_ = 0.0;
+      coordinated_trajectory_ref_pitch_velocity_radps_ = 0.0;
+      coordinated_trajectory_progress_ = 1.0;
+      coordinated_trajectory_active_ = false;
+    }
+  }
+
+  ref_extension = coordinated_trajectory_ref_extension_m_;
+  ref_pitch_angle = coordinated_trajectory_ref_pitch_rad_;
+  ref_extension_velocity = coordinated_trajectory_ref_extension_velocity_mps_;
+  ref_pitch_velocity = coordinated_trajectory_ref_pitch_velocity_radps_;
 }
 
 bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float max_zipper_velocity,
@@ -137,61 +284,50 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   double current_pitch_angle = GetPitchAngle();
 
   double zipper_extension = spiral_zipper_.GetExtension();
+  double reference_extension = zipper_extension;
+  double reference_pitch_angle = current_pitch_angle;
+  double reference_extension_velocity = 0.0;
+  double reference_pitch_velocity = 0.0;
+  UpdateCoordinatedTrajectory(goal_dist,
+                              desired_pitch_rad,
+                              std::abs(max_zipper_velocity),
+                              hold_pitch,
+                              zipper_extension,
+                              current_pitch_angle,
+                              reference_extension,
+                              reference_pitch_angle,
+                              reference_extension_velocity,
+                              reference_pitch_velocity);
+
   const bool sz_limit_pressed = spiral_zipper_.IsLimitSwitchPressed();
   static bool last_sz_limit_blocked = false;
 
   const bool turret_limit_pressed = turret_limit_switch_.IsPressed();
   static bool last_turret_limit_pressed = false;
-  double current_cable_length = GetPitchCableLength();
-  double desired_cable_length = ComputeCableLength(goal_dist, ToKinematicPitchAngle(desired_pitch_rad));
-  double cable_error = desired_cable_length - current_cable_length;
-  double zipper_error = goal_dist - zipper_extension;
-  double pitch_error = desired_pitch_rad - current_pitch_angle;
-
-  // Track pitch angle and compute Jacobian terms at the current pose.
-  double dc_dz = 0.0;
-  double dc_dpitch = 0.0;
-  ComputeCableLengthJacobian(spiral_zipper_.GetExtension(),
-                             ToKinematicPitchAngle(current_pitch_angle),
-                             dc_dz,
-                             dc_dpitch);
-  dc_dpitch *= pitch_kinematics_sign_;
+  double zipper_error = reference_extension - zipper_extension;
+  double pitch_error = reference_pitch_angle - current_pitch_angle;
+  const double goal_zipper_error = goal_dist - zipper_extension;
+  const double goal_pitch_error = desired_pitch_rad - current_pitch_angle;
 
   constexpr double kMinCommandVelocity = 0.03;
   constexpr double kMaxCommandVelocity = 2.0;
-  constexpr double kPitchLagSlowStart = 0.08726646259971647;   // 5 deg
-  constexpr double kPitchLagSlowFull = 0.3490658503988659;     // 20 deg
-  constexpr double kPitchLagMinZipperScale = 0.35;
   double zipper_velocity = std::abs(max_zipper_velocity);
   if (zipper_velocity <= 0.0) {
     zipper_velocity = kMaxCommandVelocity;
   } else {
     zipper_velocity = std::clamp(zipper_velocity, kMinCommandVelocity, kMaxCommandVelocity);
   }
-
-  double zipper_velocity_scale = 1.0;
-  const double pitch_error_mag = std::fabs(pitch_error);
-  if (pitch_error_mag > kPitchLagSlowStart) {
-    const double blend = std::clamp(
-        (pitch_error_mag - kPitchLagSlowStart) /
-            (kPitchLagSlowFull - kPitchLagSlowStart),
-        0.0,
-        1.0);
-    zipper_velocity_scale = 1.0 - blend * (1.0 - kPitchLagMinZipperScale);
+  constexpr double kMinTrackingZipperVelocity = 0.9;
+  const double reference_zipper_speed = std::max(
+      kMinTrackingZipperVelocity,
+      std::min(kMaxCommandVelocity, std::fabs(reference_extension_velocity) * 80.0 + 0.30));
+  zipper_velocity = std::min(zipper_velocity, reference_zipper_speed);
+  if (std::fabs(goal_zipper_error) > 0.003) {
+    zipper_velocity = std::max(zipper_velocity, kMinTrackingZipperVelocity);
   }
-  zipper_velocity *= zipper_velocity_scale;
   zipper_velocity = std::clamp(zipper_velocity, kMinCommandVelocity, kMaxCommandVelocity);
 
-  // Extension command -> desired zipper speed (m/s), then map to coupled cable dynamics.
-  double zipper_velocity_ref = std::clamp(
-      cable_kp_ * zipper_error,
-      -zipper_velocity,
-      zipper_velocity);
-  if (std::fabs(zipper_error) <= 0.001) {
-    zipper_velocity_ref = 0.0;
-  } else if (std::fabs(zipper_velocity_ref) < kMinCommandVelocity) {
-    zipper_velocity_ref = (zipper_velocity_ref >= 0.0) ? kMinCommandVelocity : -kMinCommandVelocity;
-  }
+  double zipper_velocity_ref = reference_extension_velocity;
 
   const bool sz_limit_blocks_retraction = sz_limit_pressed && zipper_velocity_ref < 0.0;
   if (sz_limit_blocks_retraction && !last_sz_limit_blocked) {
@@ -200,35 +336,10 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   }
   last_sz_limit_blocked = sz_limit_blocks_retraction;
 
-  spiral_zipper_.ActuateLength(goal_dist, zipper_velocity);
+  spiral_zipper_.ActuateLength(static_cast<float>(reference_extension), zipper_velocity);
 
-  // Velocity-level coupled control using the Jacobian:
-  //   dc/dt = dc/dz * dz/dt + dc/dtheta * dtheta/dt
-  constexpr double kCouplingDeadband = 0.002;
   constexpr double kPitchHoldDeadband = 0.008726646259971648;  // 0.5 deg
-  constexpr double kPitchPriorityError = 0.17453292519943295;  // 10 deg
-  constexpr double kPitchPriorityFraction = 0.6;
-  constexpr double kPitchNoReverseError = 0.03490658503988659;  // 2 deg
-  constexpr double kPitchNoReverseFraction = 0.25;
   constexpr double kSmallPitchCmd = 0.005;
-  double desired_cable_velocity = std::clamp(
-      cable_kp_ * cable_error,
-      -max_zipper_rate_coupled_,
-      max_zipper_rate_coupled_);
-
-  double coupling_pitch_cmd = 0.0;
-  const double zipper_error_reached = std::fabs(zipper_error) <= kCouplingDeadband;
-  const double cable_error_reached = std::fabs(cable_error) <= 0.005;
-  const bool use_pitch_coupling =
-      !turret_limit_pressed &&
-      !zipper_error_reached;
-  if (use_pitch_coupling && std::fabs(desired_cable_velocity) > kSmallPitchCmd) {
-    const double coupling_numerator = desired_cable_velocity - dc_dz * zipper_velocity_ref;
-    const double jacobian_scale = dc_dpitch * dc_dpitch + jacobian_damping_ * jacobian_damping_;
-    if (jacobian_scale > 0.0) {
-      coupling_pitch_cmd = pitch_coupling_gain_ * coupling_numerator * (dc_dpitch / jacobian_scale);
-    }
-  }
 
   double pitch_feedback_cmd = 0.0;
   if (std::fabs(pitch_error) > kPitchHoldDeadband) {
@@ -236,25 +347,9 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   }
 
   double desired_pitch_motor_velocity = std::clamp(
-      coupling_pitch_cmd + pitch_feedback_cmd,
+      reference_pitch_velocity + pitch_feedback_cmd,
       -max_omega_rad_,
       max_omega_rad_);
-
-  if (std::fabs(pitch_error) > kPitchPriorityError &&
-      std::fabs(pitch_feedback_cmd) > kSmallPitchCmd) {
-    const double min_tracking_velocity = kPitchPriorityFraction * pitch_feedback_cmd;
-    if (pitch_feedback_cmd > 0.0) {
-      desired_pitch_motor_velocity = std::max(desired_pitch_motor_velocity, min_tracking_velocity);
-    } else {
-      desired_pitch_motor_velocity = std::min(desired_pitch_motor_velocity, min_tracking_velocity);
-    }
-  }
-
-  if (std::fabs(pitch_error) > kPitchNoReverseError &&
-      std::fabs(pitch_feedback_cmd) > kSmallPitchCmd &&
-      desired_pitch_motor_velocity * pitch_feedback_cmd < 0.0) {
-    desired_pitch_motor_velocity = kPitchNoReverseFraction * pitch_feedback_cmd;
-  }
 
   // The pitch limit switch is only a stop in the direction that drove into it during zeroing.
   if (turret_limit_pressed && desired_pitch_motor_velocity < 0.0) {
@@ -266,7 +361,10 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   }
   last_turret_limit_pressed = turret_limit_pressed;
 
-  if (cable_error_reached && std::fabs(zipper_error) <= 0.001 && std::fabs(desired_pitch_motor_velocity) < kSmallPitchCmd) {
+  const bool final_zipper_reached = std::fabs(goal_zipper_error) < 0.001;
+  const bool final_pitch_reached = std::fabs(goal_pitch_error) < 0.03;
+  if (final_zipper_reached && final_pitch_reached &&
+      std::fabs(desired_pitch_motor_velocity) < kSmallPitchCmd) {
     desired_pitch_motor_velocity = 0.0;
   }
 
@@ -275,23 +373,24 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
                                             max_omega_rad_);
   pitch_motor_->sendCommandMITMode(0.0, desired_pitch_motor_velocity, 0.0, 1.5, 0.0);
 
-  bool pitch_reached = std::fabs(pitch_error) < 0.03; // ~1.7 deg
-  bool zipper_reached = (std::fabs(goal_dist - zipper_extension) < 0.001);
-  bool cable_reached = (std::fabs(cable_error) < 0.005);
-  if (!zipper_reached || !pitch_reached || !cable_reached) {
+  bool pitch_reached = final_pitch_reached;
+  bool zipper_reached = final_zipper_reached;
+  if (!zipper_reached || !pitch_reached) {
     static int active_log_counter = 0;
     ++active_log_counter;
     if (active_log_counter % 100 == 0) {
       std::cout << "ActuateTurretCable: pitch="
                 << (current_pitch_angle * 180.0 / M_PI) << " deg, target="
                 << (desired_pitch_rad * 180.0 / M_PI) << " deg, error="
-                << (pitch_error * 180.0 / M_PI) << " deg, pitch_cmd="
+                << (goal_pitch_error * 180.0 / M_PI) << " deg, pitch_cmd="
                 << (desired_pitch_motor_velocity * 180.0 / M_PI) << " deg/s, ext="
-                << zipper_extension << " m, goal_ext=" << goal_dist << " m" << std::endl;
+                << zipper_extension << " m, ref_ext=" << reference_extension
+                << " m, goal_ext=" << goal_dist << " m" << std::endl;
     }
     return false;
   }
 
+  ResetCoordinatedTrajectory(zipper_extension, current_pitch_angle);
   pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
   return true;
 }
@@ -466,6 +565,7 @@ bool Turret::ZeroTurret(double retract_velocity, double pitch_velocity_ratio) {
   turret_encoder_.Update();
   spiral_zipper_.UpdateEncoder();
   CapturePitchCableReferenceAtCurrentPose();
+  ResetCoordinatedTrajectory(spiral_zipper_.GetExtension(), GetPitchAngle());
   std::cout << "ZeroTurret backoff complete: pitch="
             << (GetPitchAngle() * 180.0 / M_PI) << " deg, ext="
             << spiral_zipper_.GetExtension() << " m, turret_limit="
@@ -542,6 +642,7 @@ void Turret::SetYawVelocity(double velocity) {
 
 void Turret::StopAllMotors() {
   spiral_zipper_.Stop();
+  ResetCoordinatedTrajectory(spiral_zipper_.GetExtension(), GetPitchAngle());
   if (pitch_motor_) {
     pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
   }
@@ -554,6 +655,7 @@ void Turret::ZeroPitchEncoder() {
   // Capture turret encoder reference at the current limit-switch angle.
   pitch_encoder_zero_angle_rad_ = GetRawTurretEncoderAngle();
   CapturePitchCableReferenceAtCurrentPose();
+  ResetCoordinatedTrajectory(spiral_zipper_.GetExtension(), GetPitchAngle());
   std::cout << "DEBUG: Pitch encoder reference captured at "
             << pitch_encoder_zero_angle_rad_ * 180.0 / M_PI << " deg" << std::endl;
 }

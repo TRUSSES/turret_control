@@ -18,7 +18,7 @@ class Turret {
 
   void Init();
   bool ActuateTurretCable(float goal_dist, float desired_pitch_rad, float max_zipper_velocity,
-                         bool hold_pitch = false);
+                         bool hold_pitch = false, bool prioritize_pitch = false);
   void Update();
   
   // Spiral zipper control methods for ROS2 integration
@@ -32,6 +32,12 @@ class Turret {
   int GetSpiralZipperEncoderCount() const;
 
   double GetPitchAngle() const;
+  void ComputeEndEffectorPosition(double extension, double pitch_angle_rad,
+                                  double &x, double &y) const;
+  bool SolvePitchExtensionForPoint(double x, double y,
+                                   double &extension, double &pitch_angle_rad) const;
+  bool SolvePitchForHeightAtExtension(double y, double extension,
+                                      double &pitch_angle_rad) const;
 
   // Combined zeroing routine for automatic zero sequence.
   // Returns true when both the spiral zipper limit and turret limit are reached.

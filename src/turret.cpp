@@ -273,7 +273,7 @@ void Turret::UpdateCoordinatedTrajectory(double goal_extension,
 }
 
 bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float max_zipper_velocity,
-                                bool hold_pitch) {
+                                bool hold_pitch, bool prioritize_pitch) {
   if (!pitch_motor_) {
     std::cerr << "ActuateTurretCable aborted: pitch motor unavailable" << std::endl;
     return false;
@@ -298,6 +298,11 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
                               reference_pitch_angle,
                               reference_extension_velocity,
                               reference_pitch_velocity);
+
+  if (prioritize_pitch) {
+    reference_pitch_angle = desired_pitch_rad;
+    reference_pitch_velocity = 0.0;
+  }
 
   const bool sz_limit_pressed = spiral_zipper_.IsLimitSwitchPressed();
   static bool last_sz_limit_blocked = false;
@@ -366,7 +371,7 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   if (final_zipper_reached && final_pitch_reached &&
       std::fabs(desired_pitch_motor_velocity) < kSmallPitchCmd) {
     desired_pitch_motor_velocity = 0.0;
-  }
+  }   
 
   desired_pitch_motor_velocity = std::clamp(desired_pitch_motor_velocity,
                                             -max_omega_rad_,
@@ -520,11 +525,13 @@ bool Turret::ZeroTurret(double retract_velocity, double pitch_velocity_ratio) {
   spiral_zipper_.Stop();
   pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
 
-  constexpr double kBackoffExtensionMeters = 0.015;
-  constexpr double kBackoffPitchRadians = 0.13962634015954636;  // 8 deg
-  constexpr auto kBackoffTimeout = std::chrono::seconds(5);
-  const double backoff_zipper_velocity = std::clamp(std::abs(retract_velocity), 0.2, 1.5);
-  const double backoff_pitch_velocity = std::clamp(std::abs(pitch_velocity) * 0.5, 0.20, 0.80);
+  constexpr double kBackoffExtensionMeters = 0.020;
+  constexpr double kBackoffExtensionToleranceMeters = 0.008;
+  constexpr double kBackoffPitchRadians = 0.20943951023931956;  // 12 deg
+  constexpr double kBackoffPitchToleranceRadians = 0.08726646259971647;  // 5 deg
+  constexpr auto kBackoffTimeout = std::chrono::seconds(10);
+  const double backoff_zipper_velocity = std::clamp(std::abs(retract_velocity), 0.3, 1.5);
+  const double backoff_pitch_velocity = std::clamp(std::abs(pitch_velocity), 0.5, 1.4);
   const auto backoff_deadline = std::chrono::steady_clock::now() + kBackoffTimeout;
 
   while (std::chrono::steady_clock::now() < backoff_deadline) {
@@ -564,6 +571,19 @@ bool Turret::ZeroTurret(double retract_velocity, double pitch_velocity_ratio) {
 
   turret_encoder_.Update();
   spiral_zipper_.UpdateEncoder();
+  const bool turret_limit_released = !turret_limit_switch_.IsPressed();
+  const bool sz_backed_off =
+      spiral_zipper_.GetExtension() >= (kBackoffExtensionMeters - kBackoffExtensionToleranceMeters);
+  const bool pitch_backed_off = GetPitchAngle() >= (kBackoffPitchRadians - kBackoffPitchToleranceRadians);
+  if (!turret_limit_released || !sz_backed_off || !pitch_backed_off) {
+    std::cout << "ZeroTurret backoff failed: pitch="
+              << (GetPitchAngle() * 180.0 / M_PI) << " deg, ext="
+              << spiral_zipper_.GetExtension() << " m, turret_limit="
+              << (turret_limit_switch_.IsPressed() ? "YES" : "NO")
+              << ", sz_limit=" << (spiral_zipper_.IsLimitSwitchPressed() ? "YES" : "NO")
+              << std::endl;
+    return false;
+  }
   CapturePitchCableReferenceAtCurrentPose();
   ResetCoordinatedTrajectory(spiral_zipper_.GetExtension(), GetPitchAngle());
   std::cout << "ZeroTurret backoff complete: pitch="
@@ -594,6 +614,38 @@ int Turret::GetSpiralZipperEncoderCount() const {
 
 double Turret::GetPitchAngle() const {
   return GetRawTurretEncoderAngle() - pitch_encoder_zero_angle_rad_ + pitch_angle_offset_rad_;
+}
+
+void Turret::ComputeEndEffectorPosition(double extension, double pitch_angle_rad,
+                                        double &x, double &y) const {
+  const double kinematic_pitch = ToKinematicPitchAngle(pitch_angle_rad);
+  x = x_offset_ + extension * std::cos(kinematic_pitch);
+  y = y_offset_ + extension * std::sin(kinematic_pitch);
+}
+
+bool Turret::SolvePitchExtensionForPoint(double x, double y,
+                                         double &extension, double &pitch_angle_rad) const {
+  const double dx = x - x_offset_;
+  const double dy = y - y_offset_;
+  extension = std::sqrt(dx * dx + dy * dy);
+  if (!std::isfinite(extension)) {
+    return false;
+  }
+  const double kinematic_pitch = std::atan2(dy, dx);
+  pitch_angle_rad = pitch_kinematics_sign_ * kinematic_pitch;
+  return std::isfinite(pitch_angle_rad);
+}
+
+bool Turret::SolvePitchForHeightAtExtension(double y, double extension,
+                                            double &pitch_angle_rad) const {
+  if (!std::isfinite(extension) || extension <= 1e-6) {
+    return false;
+  }
+
+  const double s = std::clamp((y - y_offset_) / extension, -1.0, 1.0);
+  const double kinematic_pitch = std::asin(s);
+  pitch_angle_rad = pitch_kinematics_sign_ * kinematic_pitch;
+  return std::isfinite(pitch_angle_rad);
 }
 
 double Turret::GetPitchMotorAngle() const {

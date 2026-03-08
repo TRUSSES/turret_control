@@ -37,3 +37,34 @@ pitch_kinematics_sign: -1.0
 pitch_angle_offset_deg: 0.0
 
 turret_id: 1
+
+docking:
+  standoff_m: 0.15
+  extension_max_m: 0.90
+  pitch_limit_deg: 50.0
+  command_velocity: 1.5
+  stage_extension_m: 0.05
+  stage_pitch_deg: 25.0
+  stage_pitch_tolerance_deg: 3.0
+  stage_min_pitch_deg: 18.0
+  stage_extension_tolerance_m: 0.005
+  camera_filter_alpha: 0.2
+  pose_timeout_sec: 0.5
+  lateral_tolerance_m: 0.05
+  hold_on_lateral_error: false
+  lock_goal_camera_y_on_stage_complete: true
+  camera_forward_sign: 1.0
+  camera_vertical_sign: 1.0
+  visual_extension_kp: 1.8
+  visual_pitch_kp: 22.0
+  visual_max_extension_rate_mps: 0.30
+  visual_max_pitch_rate_deg_s: 80.0
+  visual_distance_deadband_m: 0.01
+  visual_vertical_deadband_m: 0.005
+  visual_command_period_sec: 2.0
+  visual_extension_step_max_m: 0.12
+  visual_pitch_step_max_deg: 12.0
+  visual_slowdown_start_m: 0.30
+  visual_near_goal_scale: 0.15
+  visual_vertical_priority_error_m: 0.015
+  visual_pitch_limit_guard_deg: 8.0

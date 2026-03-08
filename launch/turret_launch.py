@@ -16,7 +16,6 @@ def generate_launch_description():
         default_value='-0.2',
         description='Velocity for zeroing operation (rad/s)'
     )
-
     # Rover base node
     turret_node = Node(
         package='turret_control',
@@ -24,7 +23,7 @@ def generate_launch_description():
         output='screen',
         parameters=[
             {
-                'zero_velocity': LaunchConfiguration('zero_velocity')
+                'zero_velocity': LaunchConfiguration('zero_velocity'),
             }
         ]
     )

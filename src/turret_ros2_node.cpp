@@ -1,7 +1,9 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/empty.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_srvs/srv/empty.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include "turret_control/msg/turret_state.hpp"
 #include "turret_control/msg/zipper_command.hpp"
 #include "turret_control/msg/turret_teleop_command.hpp"
@@ -15,6 +17,7 @@
 #include <memory>
 #include <future>
 #include <algorithm>
+#include <cmath>
 #include <signal.h>
 #include <pigpio.h>
 
@@ -58,6 +61,35 @@ public:
         
         // Declare zero velocity parameter
         this->declare_parameter("zero_velocity", -0.2);
+        this->declare_parameter("docking_standoff_m", 0.30);
+        this->declare_parameter("docking_extension_max_m", 0.90);
+        this->declare_parameter("docking_pitch_limit_deg", 50.0);
+        this->declare_parameter("docking_command_velocity", 1.5);
+        this->declare_parameter("docking_stage_extension_m", 0.05);
+        this->declare_parameter("docking_stage_pitch_deg", 25.0);
+        this->declare_parameter("docking_stage_pitch_tolerance_deg", 3.0);
+        this->declare_parameter("docking_stage_min_pitch_deg", 18.0);
+        this->declare_parameter("docking_stage_extension_tolerance_m", 0.005);
+        this->declare_parameter("docking_camera_filter_alpha", 0.2);
+        this->declare_parameter("docking_pose_timeout_sec", 0.5);
+        this->declare_parameter("docking_lateral_tolerance_m", 0.05);
+        this->declare_parameter("docking_hold_on_lateral_error", false);
+        this->declare_parameter("docking_lock_goal_camera_y_on_stage_complete", true);
+        this->declare_parameter("docking_camera_forward_sign", 1.0);
+        this->declare_parameter("docking_camera_vertical_sign", 1.0);
+        this->declare_parameter("docking_visual_extension_kp", 0.8);
+        this->declare_parameter("docking_visual_pitch_kp", 10.0);
+        this->declare_parameter("docking_visual_max_extension_rate_mps", 0.12);
+        this->declare_parameter("docking_visual_max_pitch_rate_deg_s", 35.0);
+        this->declare_parameter("docking_visual_distance_deadband_m", 0.01);
+        this->declare_parameter("docking_visual_vertical_deadband_m", 0.005);
+        this->declare_parameter("docking_visual_command_period_sec", 0.25);
+        this->declare_parameter("docking_visual_extension_step_max_m", 0.08);
+        this->declare_parameter("docking_visual_pitch_step_max_deg", 8.0);
+        this->declare_parameter("docking_visual_slowdown_start_m", 0.30);
+        this->declare_parameter("docking_visual_near_goal_scale", 0.25);
+        this->declare_parameter("docking_visual_vertical_priority_error_m", 0.02);
+        this->declare_parameter("docking_visual_pitch_limit_guard_deg", 5.0);
         
         // Load configuration - try different paths
         std::vector<std::string> config_paths = {
@@ -81,6 +113,96 @@ public:
             throw std::runtime_error("Configuration file not found");
         }
         config_ = Config::Instance().GetConfig();
+        if (config_["docking"]) {
+            const auto docking = config_["docking"];
+            if (docking["standoff_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_standoff_m", docking["standoff_m"].as<double>()));
+            }
+            if (docking["extension_max_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_extension_max_m", docking["extension_max_m"].as<double>()));
+            }
+            if (docking["pitch_limit_deg"]) {
+                this->set_parameter(rclcpp::Parameter("docking_pitch_limit_deg", docking["pitch_limit_deg"].as<double>()));
+            }
+            if (docking["command_velocity"]) {
+                this->set_parameter(rclcpp::Parameter("docking_command_velocity", docking["command_velocity"].as<double>()));
+            }
+            if (docking["stage_extension_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_stage_extension_m", docking["stage_extension_m"].as<double>()));
+            }
+            if (docking["stage_pitch_deg"]) {
+                this->set_parameter(rclcpp::Parameter("docking_stage_pitch_deg", docking["stage_pitch_deg"].as<double>()));
+            }
+            if (docking["stage_pitch_tolerance_deg"]) {
+                this->set_parameter(rclcpp::Parameter("docking_stage_pitch_tolerance_deg", docking["stage_pitch_tolerance_deg"].as<double>()));
+            }
+            if (docking["stage_min_pitch_deg"]) {
+                this->set_parameter(rclcpp::Parameter("docking_stage_min_pitch_deg", docking["stage_min_pitch_deg"].as<double>()));
+            }
+            if (docking["stage_extension_tolerance_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_stage_extension_tolerance_m", docking["stage_extension_tolerance_m"].as<double>()));
+            }
+            if (docking["camera_filter_alpha"]) {
+                this->set_parameter(rclcpp::Parameter("docking_camera_filter_alpha", docking["camera_filter_alpha"].as<double>()));
+            }
+            if (docking["pose_timeout_sec"]) {
+                this->set_parameter(rclcpp::Parameter("docking_pose_timeout_sec", docking["pose_timeout_sec"].as<double>()));
+            }
+            if (docking["lateral_tolerance_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_lateral_tolerance_m", docking["lateral_tolerance_m"].as<double>()));
+            }
+            if (docking["hold_on_lateral_error"]) {
+                this->set_parameter(rclcpp::Parameter("docking_hold_on_lateral_error", docking["hold_on_lateral_error"].as<bool>()));
+            }
+            if (docking["lock_goal_camera_y_on_stage_complete"]) {
+                this->set_parameter(rclcpp::Parameter("docking_lock_goal_camera_y_on_stage_complete", docking["lock_goal_camera_y_on_stage_complete"].as<bool>()));
+            }
+            if (docking["camera_forward_sign"]) {
+                this->set_parameter(rclcpp::Parameter("docking_camera_forward_sign", docking["camera_forward_sign"].as<double>()));
+            }
+            if (docking["camera_vertical_sign"]) {
+                this->set_parameter(rclcpp::Parameter("docking_camera_vertical_sign", docking["camera_vertical_sign"].as<double>()));
+            }
+            if (docking["visual_extension_kp"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_extension_kp", docking["visual_extension_kp"].as<double>()));
+            }
+            if (docking["visual_pitch_kp"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_pitch_kp", docking["visual_pitch_kp"].as<double>()));
+            }
+            if (docking["visual_max_extension_rate_mps"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_max_extension_rate_mps", docking["visual_max_extension_rate_mps"].as<double>()));
+            }
+            if (docking["visual_max_pitch_rate_deg_s"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_max_pitch_rate_deg_s", docking["visual_max_pitch_rate_deg_s"].as<double>()));
+            }
+            if (docking["visual_distance_deadband_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_distance_deadband_m", docking["visual_distance_deadband_m"].as<double>()));
+            }
+            if (docking["visual_vertical_deadband_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_vertical_deadband_m", docking["visual_vertical_deadband_m"].as<double>()));
+            }
+            if (docking["visual_command_period_sec"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_command_period_sec", docking["visual_command_period_sec"].as<double>()));
+            }
+            if (docking["visual_extension_step_max_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_extension_step_max_m", docking["visual_extension_step_max_m"].as<double>()));
+            }
+            if (docking["visual_pitch_step_max_deg"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_pitch_step_max_deg", docking["visual_pitch_step_max_deg"].as<double>()));
+            }
+            if (docking["visual_slowdown_start_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_slowdown_start_m", docking["visual_slowdown_start_m"].as<double>()));
+            }
+            if (docking["visual_near_goal_scale"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_near_goal_scale", docking["visual_near_goal_scale"].as<double>()));
+            }
+            if (docking["visual_vertical_priority_error_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_vertical_priority_error_m", docking["visual_vertical_priority_error_m"].as<double>()));
+            }
+            if (docking["visual_pitch_limit_guard_deg"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_pitch_limit_guard_deg", docking["visual_pitch_limit_guard_deg"].as<double>()));
+            }
+        }
 
         // Read turret_id from config
         turret_id_ = config_["turret_id"] ? config_["turret_id"].as<int>() : 1;
@@ -130,6 +252,10 @@ public:
         state_pub_ = this->create_publisher<turret_control::msg::TurretState>(topic_prefix_ + "/state", 10);
         velocities_pub_ = this->create_publisher<turret_control::msg::TurretVelocities>(
             "cmd_vel/" + topic_prefix_ + "/velocities", 10);
+        docking_camera_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+            topic_prefix_ + "/docking/camera_estimate_base", 10);
+        docking_target_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+            topic_prefix_ + "/docking/target_pose_base", 10);
 
         // Subscribers
         zipper_cmd_sub_ = this->create_subscription<turret_control::msg::ZipperCommand>(
@@ -144,6 +270,12 @@ public:
         load_cell_force_sub_ = this->create_subscription<turret_control::msg::LoadCellForce>(
             topic_prefix_ + "/load_cell_force", 10,
             std::bind(&TurretROS2Node::loadCellForceCallback, this, std::placeholders::_1));
+        vision_tag_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+            "/vision/end_effector_tag_pose_camera", 10,
+            std::bind(&TurretROS2Node::visionTagPoseCallback, this, std::placeholders::_1));
+        vision_tag_visible_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+            "/vision/tag_visible", 10,
+            std::bind(&TurretROS2Node::visionTagVisibleCallback, this, std::placeholders::_1));
 
         // Services
         try {
@@ -208,7 +340,8 @@ private:
         READY = 1,
         RUNNING = 2,
         TELEOP = 3,
-        TELEOP_ZERO = 4
+        TELEOP_ZERO = 4,
+        DOCKING = 5
     };
 
     // Core components
@@ -236,6 +369,45 @@ private:
     bool yaw_zeroed_ = false;      // Yaw motor zeroed
     double current_pitch_angle_ = 0.0;  // Current pitch angle from encoder
     double current_yaw_angle_ = 0.0;    // Current yaw angle from motor feedback
+    bool docking_enabled_ = false;
+    bool vision_tag_visible_ = false;
+    bool have_camera_estimate_ = false;
+    double docking_standoff_m_ = 0.30;
+    double docking_extension_max_m_ = 0.90;
+    double docking_pitch_limit_rad_ = 50.0 * M_PI / 180.0;
+    double docking_command_velocity_ = 1.5;
+    double docking_stage_extension_m_ = 0.05;
+    double docking_stage_pitch_rad_ = 25.0 * M_PI / 180.0;
+    double docking_stage_pitch_tolerance_rad_ = 3.0 * M_PI / 180.0;
+    double docking_stage_min_pitch_rad_ = 18.0 * M_PI / 180.0;
+    double docking_stage_extension_tolerance_m_ = 0.005;
+    bool docking_stage_active_ = false;
+    double docking_camera_filter_alpha_ = 0.2;
+    double docking_pose_timeout_sec_ = 0.5;
+    double docking_lateral_tolerance_m_ = 0.05;
+    bool docking_hold_on_lateral_error_ = false;
+    bool docking_lock_goal_camera_y_on_stage_complete_ = true;
+    double docking_camera_forward_sign_ = 1.0;
+    double docking_camera_vertical_sign_ = 1.0;
+    double docking_visual_extension_kp_ = 0.8;
+    double docking_visual_pitch_kp_ = 10.0;
+    double docking_visual_max_extension_rate_mps_ = 0.12;
+    double docking_visual_max_pitch_rate_radps_ = 35.0 * M_PI / 180.0;
+    double docking_visual_distance_deadband_m_ = 0.01;
+    double docking_visual_vertical_deadband_m_ = 0.005;
+    double docking_visual_command_period_sec_ = 0.25;
+    double docking_visual_extension_step_max_m_ = 0.08;
+    double docking_visual_pitch_step_max_rad_ = 8.0 * M_PI / 180.0;
+    double docking_visual_slowdown_start_m_ = 0.30;
+    double docking_visual_near_goal_scale_ = 0.25;
+    double docking_visual_vertical_priority_error_m_ = 0.02;
+    double docking_visual_pitch_limit_guard_rad_ = 5.0 * M_PI / 180.0;
+    double estimated_camera_x_base_ = 0.0;
+    double estimated_camera_y_base_ = 0.0;
+    double docking_goal_camera_y_m_ = 0.0;
+    geometry_msgs::msg::PoseStamped latest_tag_pose_camera_;
+    rclcpp::Time latest_tag_pose_time_{0, 0, RCL_ROS_TIME};
+    rclcpp::Time docking_last_servo_update_{0, 0, RCL_ROS_TIME};
     
     
     // Cached load cell data received from LoadCellNode (updated via subscription)
@@ -246,11 +418,15 @@ private:
     rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr heartbeat_pub_;
     rclcpp::Publisher<turret_control::msg::TurretState>::SharedPtr state_pub_;
     rclcpp::Publisher<turret_control::msg::TurretVelocities>::SharedPtr velocities_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr docking_camera_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr docking_target_pub_;
 
     // ROS2 subscribers
     rclcpp::Subscription<turret_control::msg::ZipperCommand>::SharedPtr zipper_cmd_sub_;
     rclcpp::Subscription<turret_control::msg::TurretTeleopCommand>::SharedPtr teleop_cmd_sub_;
     rclcpp::Subscription<turret_control::msg::LoadCellForce>::SharedPtr load_cell_force_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr vision_tag_pose_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr vision_tag_visible_sub_;
 
     // Teleop command variables
     double teleop_sz_velocity_ = 0.0;
@@ -351,6 +527,15 @@ private:
                 }
                 break;
 
+            case TurretState::DOCKING:
+                if (is_zeroed_) {
+                    executeZipperCommand();
+                } else {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                        "In DOCKING state but not zeroed - cannot execute commands");
+                }
+                break;
+
             case TurretState::TELEOP:
                 // In TELEOP state, execute direct velocity commands (no zeroing required)
                 executeTeleopCommand();
@@ -408,6 +593,9 @@ private:
         // Command the spiral zipper to move to desired position with desired velocity
         try {
             if (turret_) {
+                if (current_state_ == TurretState::DOCKING) {
+                    updateDockingSetpoint();
+                }
                 // desired_pitch_angle_ is frozen when the command is accepted.
                 double desired_pitch = desired_pitch_angle_;
                 double max_velocity = std::abs(desired_velocity_);
@@ -415,7 +603,8 @@ private:
                     static_cast<float>(desired_length_),
                     static_cast<float>(desired_pitch),
                     static_cast<float>(max_velocity),
-                    hold_current_pitch_);
+                    hold_current_pitch_,
+                    current_state_ == TurretState::DOCKING);
 
     // RCLCPP_INFO(this->get_logger(),
     //     "EXECUTING zipper command: length=%.3f meters, max_velocity=%.3f",
@@ -587,6 +776,9 @@ private:
             case TurretState::RUNNING:
                 state_msg.status_message = "Turret is RUNNING";
                 break;
+            case TurretState::DOCKING:
+                state_msg.status_message = "Turret is DOCKING";
+                break;
             case TurretState::TELEOP:
                 state_msg.status_message = "Turret is in TELEOP mode";
                 break;
@@ -609,6 +801,225 @@ private:
     {
         latest_lc_force_ = msg->force;
         latest_lc_ready_ = msg->calibrated;
+    }
+
+    void visionTagPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+    {
+        latest_tag_pose_camera_ = *msg;
+        latest_tag_pose_time_ = this->now();
+    }
+
+    void visionTagVisibleCallback(const std_msgs::msg::Bool::SharedPtr msg)
+    {
+        vision_tag_visible_ = msg->data;
+    }
+
+    void updateDockingSetpoint()
+    {
+        if (!turret_ || !pitch_zeroed_) {
+            return;
+        }
+
+        if (docking_stage_active_) {
+            const bool stage_extension_reached =
+                current_extension_ >= (docking_stage_extension_m_ - docking_stage_extension_tolerance_m_);
+            const bool stage_pitch_reached =
+                current_pitch_angle_ >= (docking_stage_pitch_rad_ - docking_stage_pitch_tolerance_rad_);
+            const bool stage_pitch_visible_ready =
+                vision_tag_visible_ && current_pitch_angle_ >= docking_stage_min_pitch_rad_;
+            if (!stage_extension_reached || (!stage_pitch_reached && !stage_pitch_visible_ready)) {
+                desired_length_ = std::max(current_extension_, docking_stage_extension_m_);
+                desired_pitch_angle_ = docking_stage_pitch_rad_;
+                desired_velocity_ = std::max(docking_command_velocity_, 1.5);
+                hold_current_pitch_ = false;
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "Docking stage move: cmd_ext=%.3f m cmd_pitch=%.2f deg current_ext=%.3f m current_pitch=%.2f deg",
+                    desired_length_, desired_pitch_angle_ * 180.0 / M_PI,
+                    current_extension_, current_pitch_angle_ * 180.0 / M_PI);
+                return;
+            }
+
+            docking_stage_active_ = false;
+            have_camera_estimate_ = false;
+            if (docking_lock_goal_camera_y_on_stage_complete_ && vision_tag_visible_) {
+                docking_goal_camera_y_m_ = latest_tag_pose_camera_.pose.position.y;
+            } else {
+                docking_goal_camera_y_m_ = 0.0;
+            }
+            docking_last_servo_update_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
+            RCLCPP_INFO(this->get_logger(),
+                "Docking stage complete at ext=%.3f m pitch=%.2f deg (tag_visible=%s, goal_cam_y=%.3f m) - switching to vision-guided docking",
+                current_extension_, current_pitch_angle_ * 180.0 / M_PI,
+                vision_tag_visible_ ? "true" : "false",
+                docking_goal_camera_y_m_);
+        }
+
+        const double pose_age = (this->now() - latest_tag_pose_time_).seconds();
+        if (!vision_tag_visible_ || pose_age > docking_pose_timeout_sec_) {
+            desired_length_ = current_extension_;
+            desired_pitch_angle_ = current_pitch_angle_;
+            desired_velocity_ = 0.0;
+            hold_current_pitch_ = true;
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Docking active but no fresh vision pose available (visible=%s age=%.3f s)",
+                vision_tag_visible_ ? "true" : "false", pose_age);
+            return;
+        }
+
+        const double lateral_error = latest_tag_pose_camera_.pose.position.x;
+        if (std::fabs(lateral_error) > docking_lateral_tolerance_m_) {
+            if (docking_hold_on_lateral_error_) {
+                desired_length_ = current_extension_;
+                desired_pitch_angle_ = current_pitch_angle_;
+                desired_velocity_ = 0.0;
+                hold_current_pitch_ = true;
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "Docking lateral camera error %.3f m exceeds tolerance %.3f m. Holding position until yaw is aligned.",
+                    lateral_error, docking_lateral_tolerance_m_);
+                return;
+            }
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Docking lateral camera error %.3f m exceeds tolerance %.3f m, but continuing because lateral hold is disabled.",
+                lateral_error, docking_lateral_tolerance_m_);
+        }
+
+        const rclcpp::Time servo_now = this->now();
+        double servo_dt = docking_visual_command_period_sec_;
+        if (docking_last_servo_update_.nanoseconds() != 0) {
+            servo_dt = (servo_now - docking_last_servo_update_).seconds();
+        }
+        if (docking_last_servo_update_.nanoseconds() != 0 &&
+            servo_dt < docking_visual_command_period_sec_) {
+            return;
+        }
+        docking_last_servo_update_ = servo_now;
+        servo_dt = std::clamp(servo_dt, docking_visual_command_period_sec_, docking_visual_command_period_sec_ * 2.0);
+
+        const double z_cam = latest_tag_pose_camera_.pose.position.z;
+        const double y_cam = latest_tag_pose_camera_.pose.position.y;
+        const double z_error = z_cam - docking_standoff_m_;
+        const double y_error = docking_goal_camera_y_m_ - y_cam;
+
+        double extension_rate_cmd = 0.0;
+        if (std::fabs(z_error) > docking_visual_distance_deadband_m_) {
+            extension_rate_cmd = docking_visual_extension_kp_ * z_error;
+        }
+        extension_rate_cmd = std::clamp(
+            extension_rate_cmd,
+            -docking_visual_max_extension_rate_mps_,
+            docking_visual_max_extension_rate_mps_);
+
+        double pitch_rate_cmd = 0.0;
+        if (std::fabs(y_error) > docking_visual_vertical_deadband_m_) {
+            pitch_rate_cmd = docking_visual_pitch_kp_ * y_error;
+        }
+        pitch_rate_cmd = std::clamp(
+            pitch_rate_cmd,
+            -docking_visual_max_pitch_rate_radps_,
+            docking_visual_max_pitch_rate_radps_);
+
+        double near_goal_scale = 1.0;
+        if (docking_visual_slowdown_start_m_ > docking_standoff_m_ && z_cam < docking_visual_slowdown_start_m_) {
+            const double normalized = std::clamp(
+                (z_cam - docking_standoff_m_) /
+                std::max(1e-6, docking_visual_slowdown_start_m_ - docking_standoff_m_),
+                0.0,
+                1.0);
+            near_goal_scale =
+                docking_visual_near_goal_scale_ +
+                (1.0 - docking_visual_near_goal_scale_) * normalized;
+        }
+
+        double extension_scale = near_goal_scale;
+        if (z_cam < docking_visual_slowdown_start_m_ &&
+            std::fabs(y_error) > docking_visual_vertical_priority_error_m_) {
+            extension_scale *= std::clamp(
+                docking_visual_vertical_priority_error_m_ / std::fabs(y_error),
+                0.0,
+                1.0);
+        }
+
+        const bool near_positive_pitch_limit =
+            current_pitch_angle_ >= (docking_pitch_limit_rad_ - docking_visual_pitch_limit_guard_rad_);
+        const bool near_negative_pitch_limit =
+            current_pitch_angle_ <= (-docking_pitch_limit_rad_ + docking_visual_pitch_limit_guard_rad_);
+        if ((near_positive_pitch_limit && pitch_rate_cmd > 0.0) ||
+            (near_negative_pitch_limit && pitch_rate_cmd < 0.0)) {
+            extension_scale = 0.0;
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Docking: pitch is near its limit with unresolved vertical error; pausing extension to preserve tag visibility.");
+        }
+
+        extension_rate_cmd *= extension_scale;
+        pitch_rate_cmd *= (0.6 + 0.4 * near_goal_scale);
+
+        double extension_step_limit = docking_visual_extension_step_max_m_;
+        if (z_cam < docking_visual_slowdown_start_m_) {
+            extension_step_limit *= near_goal_scale;
+        }
+        extension_step_limit = std::clamp(
+            extension_step_limit,
+            docking_visual_distance_deadband_m_,
+            docking_visual_extension_step_max_m_);
+        extension_step_limit = std::min(extension_step_limit, std::max(docking_visual_distance_deadband_m_, std::fabs(z_error)));
+
+        double pitch_step_limit = docking_visual_pitch_step_max_rad_;
+        if (z_cam < docking_visual_slowdown_start_m_) {
+            pitch_step_limit *= (0.5 + 0.5 * near_goal_scale);
+        }
+        pitch_step_limit = std::clamp(
+            pitch_step_limit,
+            1.0 * M_PI / 180.0,
+            docking_visual_pitch_step_max_rad_);
+
+        const double extension_step = std::clamp(
+            extension_rate_cmd * servo_dt,
+            -extension_step_limit,
+            extension_step_limit);
+        const double pitch_step = std::clamp(
+            pitch_rate_cmd * servo_dt,
+            -pitch_step_limit,
+            pitch_step_limit);
+
+        desired_length_ = std::clamp(
+            current_extension_ + extension_step,
+            0.0,
+            docking_extension_max_m_);
+        desired_pitch_angle_ = std::clamp(
+            current_pitch_angle_ + pitch_step,
+            -docking_pitch_limit_rad_,
+            docking_pitch_limit_rad_);
+        desired_velocity_ = std::max(docking_command_velocity_, 1.5);
+        hold_current_pitch_ = false;
+
+        auto camera_pose_msg = geometry_msgs::msg::PoseStamped();
+        camera_pose_msg.header.stamp = this->now();
+        camera_pose_msg.header.frame_id = latest_tag_pose_camera_.header.frame_id.empty()
+            ? "camera_link" : latest_tag_pose_camera_.header.frame_id;
+        camera_pose_msg.pose.position.x = z_cam;
+        camera_pose_msg.pose.position.y = 0.0;
+        camera_pose_msg.pose.position.z = y_cam;
+        camera_pose_msg.pose.orientation.w = 1.0;
+        docking_camera_pub_->publish(camera_pose_msg);
+
+        auto target_pose_msg = geometry_msgs::msg::PoseStamped();
+        target_pose_msg.header = camera_pose_msg.header;
+        target_pose_msg.pose.position.x = docking_standoff_m_;
+        target_pose_msg.pose.position.y = 0.0;
+        target_pose_msg.pose.position.z = docking_goal_camera_y_m_;
+        target_pose_msg.pose.orientation.w = 1.0;
+        docking_target_pub_->publish(target_pose_msg);
+
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+            "Docking servo: cam_yz=(%.3f, %.3f) m target_yz=(%.3f, %.3f) m err_yz=(%.3f, %.3f) scale=%.2f step=[ext=%.3f m pitch=%.2f deg] rates=[ext=%.3f m/s pitch=%.2f deg/s] cmd=[ext=%.3f m pitch=%.2f deg] cam_x=%.3f m",
+            y_cam, z_cam,
+            docking_goal_camera_y_m_, docking_standoff_m_,
+            y_error, z_error,
+            extension_scale,
+            extension_step, pitch_step * 180.0 / M_PI,
+            extension_rate_cmd, pitch_rate_cmd * 180.0 / M_PI,
+            desired_length_, desired_pitch_angle_ * 180.0 / M_PI,
+            lateral_error);
     }
 
 
@@ -820,6 +1231,8 @@ private:
             case TurretState::IDLE:
                 // Stop motor when going to IDLE
                 stopMotor();
+                docking_enabled_ = false;
+                docking_stage_active_ = false;
                 current_state_ = TurretState::IDLE;
                 response->success = true;
                 response->message = "State changed to IDLE";
@@ -832,6 +1245,8 @@ private:
                 } else {
                     // Stop motor when going to READY
                     stopMotor();
+                    docking_enabled_ = false;
+                    docking_stage_active_ = false;
                     current_state_ = TurretState::READY;
                     response->success = true;
                     response->message = "State changed to READY";
@@ -843,9 +1258,87 @@ private:
                     response->success = false;
                     response->message = "Cannot go to RUNNING: turret not zeroed";
                 } else {
+                    docking_enabled_ = false;
+                    docking_stage_active_ = false;
                     current_state_ = TurretState::RUNNING;
                     response->success = true;
                     response->message = "State changed to RUNNING";
+                }
+                break;
+
+            case TurretState::DOCKING:
+                if (!is_zeroed_) {
+                    response->success = false;
+                    response->message = "Cannot go to DOCKING: turret not zeroed";
+                } else {
+                    docking_standoff_m_ = this->get_parameter("docking_standoff_m").as_double();
+                    docking_extension_max_m_ = this->get_parameter("docking_extension_max_m").as_double();
+                    docking_pitch_limit_rad_ = this->get_parameter("docking_pitch_limit_deg").as_double() * M_PI / 180.0;
+                    docking_command_velocity_ = this->get_parameter("docking_command_velocity").as_double();
+                    docking_stage_extension_m_ = this->get_parameter("docking_stage_extension_m").as_double();
+                    docking_stage_pitch_rad_ = this->get_parameter("docking_stage_pitch_deg").as_double() * M_PI / 180.0;
+                    docking_stage_pitch_tolerance_rad_ = this->get_parameter("docking_stage_pitch_tolerance_deg").as_double() * M_PI / 180.0;
+                    docking_stage_min_pitch_rad_ = this->get_parameter("docking_stage_min_pitch_deg").as_double() * M_PI / 180.0;
+                    docking_stage_extension_tolerance_m_ = this->get_parameter("docking_stage_extension_tolerance_m").as_double();
+                    docking_camera_filter_alpha_ = this->get_parameter("docking_camera_filter_alpha").as_double();
+                    docking_pose_timeout_sec_ = this->get_parameter("docking_pose_timeout_sec").as_double();
+                    docking_lateral_tolerance_m_ = this->get_parameter("docking_lateral_tolerance_m").as_double();
+                    docking_hold_on_lateral_error_ = this->get_parameter("docking_hold_on_lateral_error").as_bool();
+                    docking_lock_goal_camera_y_on_stage_complete_ =
+                        this->get_parameter("docking_lock_goal_camera_y_on_stage_complete").as_bool();
+                    docking_camera_forward_sign_ = this->get_parameter("docking_camera_forward_sign").as_double();
+                    docking_camera_vertical_sign_ = this->get_parameter("docking_camera_vertical_sign").as_double();
+                    docking_visual_extension_kp_ = this->get_parameter("docking_visual_extension_kp").as_double();
+                    docking_visual_pitch_kp_ = this->get_parameter("docking_visual_pitch_kp").as_double();
+                    docking_visual_max_extension_rate_mps_ =
+                        this->get_parameter("docking_visual_max_extension_rate_mps").as_double();
+                    docking_visual_max_pitch_rate_radps_ =
+                        this->get_parameter("docking_visual_max_pitch_rate_deg_s").as_double() * M_PI / 180.0;
+                    docking_visual_distance_deadband_m_ =
+                        this->get_parameter("docking_visual_distance_deadband_m").as_double();
+                    docking_visual_vertical_deadband_m_ =
+                        this->get_parameter("docking_visual_vertical_deadband_m").as_double();
+                    docking_visual_command_period_sec_ =
+                        this->get_parameter("docking_visual_command_period_sec").as_double();
+                    docking_visual_extension_step_max_m_ =
+                        this->get_parameter("docking_visual_extension_step_max_m").as_double();
+                    docking_visual_pitch_step_max_rad_ =
+                        this->get_parameter("docking_visual_pitch_step_max_deg").as_double() * M_PI / 180.0;
+                    docking_visual_slowdown_start_m_ =
+                        this->get_parameter("docking_visual_slowdown_start_m").as_double();
+                    docking_visual_near_goal_scale_ =
+                        this->get_parameter("docking_visual_near_goal_scale").as_double();
+                    docking_visual_vertical_priority_error_m_ =
+                        this->get_parameter("docking_visual_vertical_priority_error_m").as_double();
+                    docking_visual_pitch_limit_guard_rad_ =
+                        this->get_parameter("docking_visual_pitch_limit_guard_deg").as_double() * M_PI / 180.0;
+                    docking_enabled_ = true;
+                    docking_stage_active_ = true;
+                    have_camera_estimate_ = false;
+                    docking_goal_camera_y_m_ = 0.0;
+                    docking_last_servo_update_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
+                    current_state_ = TurretState::DOCKING;
+                    response->success = true;
+                    response->message = "State changed to DOCKING";
+                    RCLCPP_INFO(this->get_logger(),
+                        "Docking armed: standoff=%.3f m, extension_max=%.3f m, pitch_limit=%.1f deg, stage=[ext=%.3f m pitch=%.1f deg min_pitch=%.1f deg], lateral_hold=%s lock_goal_cam_y=%s, visual_gains=[ext=%.2f pitch=%.2f max_ext=%.2f m/s max_pitch=%.1f deg/s period=%.2f s step_ext=%.3f m step_pitch=%.1f deg slowdown_start=%.2f m near_scale=%.2f priority_err=%.3f m], camera_signs=[forward=%.1f vertical=%.1f]",
+                        docking_standoff_m_, docking_extension_max_m_,
+                        docking_pitch_limit_rad_ * 180.0 / M_PI,
+                        docking_stage_extension_m_, docking_stage_pitch_rad_ * 180.0 / M_PI,
+                        docking_stage_min_pitch_rad_ * 180.0 / M_PI,
+                        docking_hold_on_lateral_error_ ? "true" : "false",
+                        docking_lock_goal_camera_y_on_stage_complete_ ? "true" : "false",
+                        docking_visual_extension_kp_,
+                        docking_visual_pitch_kp_,
+                        docking_visual_max_extension_rate_mps_,
+                        docking_visual_max_pitch_rate_radps_ * 180.0 / M_PI,
+                        docking_visual_command_period_sec_,
+                        docking_visual_extension_step_max_m_,
+                        docking_visual_pitch_step_max_rad_ * 180.0 / M_PI,
+                        docking_visual_slowdown_start_m_,
+                        docking_visual_near_goal_scale_,
+                        docking_visual_vertical_priority_error_m_,
+                        docking_camera_forward_sign_, docking_camera_vertical_sign_);
                 }
                 break;
 
@@ -861,6 +1354,8 @@ private:
                 teleop_sz_velocity_ = 0.0;
                 teleop_pitch_velocity_ = 0.0;
                 teleop_yaw_velocity_ = 0.0;
+                docking_enabled_ = false;
+                docking_stage_active_ = false;
                 current_state_ = TurretState::TELEOP;
                 response->success = true;
                 response->message = "State changed to TELEOP (direct motor control)";
@@ -882,6 +1377,8 @@ private:
                 pitch_zeroed_ = false;
                 yaw_zeroed_ = false;
                 is_zeroed_ = false;
+                docking_enabled_ = false;
+                docking_stage_active_ = false;
                 current_state_ = TurretState::TELEOP_ZERO;
                 response->success = true;
                 response->message = "State changed to TELEOP_ZERO (zeroing mode)";

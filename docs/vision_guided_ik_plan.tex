@@ -1,0 +1,240 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{enumitem}
+\usepackage{hyperref}
+
+\title{Vision-Guided Turret IK Plan}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{Goal}
+Add a vision-guided control mode in which:
+\begin{itemize}[leftmargin=1.5em]
+  \item Raspberry Pi 2 runs a camera and AprilTag perception stack.
+  \item The camera tracks an AprilTag rigidly attached to the spiral zipper end effector.
+  \item Pi 2 publishes the measured 3D tag pose.
+  \item Raspberry Pi 1 runs closed-loop inverse kinematics (IK) to move the turret so that the end effector reaches a desired goal position near the camera.
+\end{itemize}
+
+\section*{High-Level Architecture}
+The system should be split into perception and control:
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Pi 2 (Perception):} camera driver, camera calibration, AprilTag detection, 3D pose estimation, TF publication.
+  \item \textbf{Pi 1 (Control):} receives the current end-effector pose, computes IK, and drives yaw, pitch, and extension through the existing turret controller.
+\end{itemize}
+
+This should be implemented as a distributed ROS 2 system. Both Pis share the same ROS domain and exchange messages and TF frames over the network.
+
+\section*{Frame Definitions}
+Use TF consistently. Recommended frames:
+\begin{itemize}[leftmargin=1.5em]
+  \item \texttt{base\_link}: turret base frame.
+  \item \texttt{yaw\_link}: frame after yaw rotation.
+  \item \texttt{pitch\_link}: frame at turret pitch pivot.
+  \item \texttt{end\_effector}: actual spiral zipper tip / tool point.
+  \item \texttt{tag\_link}: AprilTag frame rigidly attached to the end effector.
+  \item \texttt{camera\_link}: physical camera frame.
+  \item \texttt{camera\_optical\_frame}: ROS optical camera frame.
+\end{itemize}
+
+Known or measured transforms:
+\begin{itemize}[leftmargin=1.5em]
+  \item \(T_{\text{base}\_\text{camera}}\): static transform from turret base to camera.
+  \item \(T_{\text{tag}\_\text{ee}}\): static transform from the tag center to the actual end-effector tool point.
+  \item \(T_{\text{camera}\_\text{tag}}\): measured dynamically from AprilTag detection.
+\end{itemize}
+
+Then:
+\[
+T_{\text{base}\_\text{ee}} =
+T_{\text{base}\_\text{camera}}
+\; T_{\text{camera}\_\text{tag}}
+\; T_{\text{tag}\_\text{ee}}
+\]
+
+This gives the measured end-effector pose in the turret base frame.
+
+\section*{Perception Pipeline on Pi 2}
+\subsection*{Required outputs}
+Pi 2 must publish:
+\begin{itemize}[leftmargin=1.5em]
+  \item rectified camera image,
+  \item camera intrinsics on \texttt{/camera/camera\_info},
+  \item tag pose in camera frame,
+  \item optionally end-effector pose in base frame if Pi 2 also knows the camera extrinsic.
+\end{itemize}
+
+\subsection*{Recommended ROS 2 stack}
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Camera driver:} \texttt{camera\_ros} with \texttt{libcamera} for Raspberry Pi CSI cameras.
+  \item \textbf{Calibration:} \texttt{camera\_calibration}.
+  \item \textbf{AprilTag detection:} a ROS 2 AprilTag node that consumes rectified images plus \texttt{CameraInfo} and publishes 3D pose.
+  \item \textbf{TF:} \texttt{tf2\_ros} for static and dynamic transforms.
+\end{itemize}
+
+\subsection*{Calibration requirements}
+Accurate tag pose estimation requires:
+\begin{itemize}[leftmargin=1.5em]
+  \item camera intrinsics (focal lengths, principal point),
+  \item distortion coefficients,
+  \item correct tag size in meters,
+  \item the static camera extrinsic relative to the turret base or world.
+\end{itemize}
+
+\section*{Control Pipeline on Pi 1}
+\subsection*{Inputs}
+Pi 1 should consume:
+\begin{itemize}[leftmargin=1.5em]
+  \item measured current end-effector pose \(T_{\text{base}\_\text{ee}}\),
+  \item desired end-effector goal pose \(T_{\text{base}\_\text{goal}}\) or desired goal position \(p_{\text{goal}} = [x, y, z]^T\).
+\end{itemize}
+
+\subsection*{Outputs}
+Pi 1 computes and commands:
+\begin{itemize}[leftmargin=1.5em]
+  \item yaw angle,
+  \item pitch angle,
+  \item spiral zipper extension.
+\end{itemize}
+
+\subsection*{Closed-loop logic}
+Do not use one-shot IK only. Use closed-loop updates:
+\begin{enumerate}[leftmargin=1.7em]
+  \item Measure current end-effector pose from vision.
+  \item Compute goal error in \texttt{base\_link}.
+  \item Solve IK to get desired turret joint values.
+  \item Command the turret toward those values.
+  \item Repeat at \(10\) to \(30\) Hz.
+\end{enumerate}
+
+This compensates for model mismatch, cable compliance, gravity, and unmodeled mechanical offsets.
+
+\section*{Forward Kinematics}
+The turret has three commanded degrees of freedom:
+\begin{itemize}[leftmargin=1.5em]
+  \item yaw \(\psi\),
+  \item pitch \(\theta\),
+  \item extension \(a\).
+\end{itemize}
+
+Let the pitch-plane end-effector position relative to the pitch pivot be
+\[
+p_{\text{plane}} =
+\begin{bmatrix}
+a \cos \theta \\
+a \sin \theta
+\end{bmatrix}
+\]
+with the turret pivot offset included from the base frame.
+
+Then yaw rotates this planar position around the base vertical axis:
+\[
+p_{\text{ee}} = R_z(\psi)\, p_{\text{plane}} + p_{\text{pivot}}
+\]
+where \(p_{\text{pivot}}\) is the fixed base-to-pivot offset in 3D.
+
+The first implementation should focus on \textbf{position-only IK}. End-effector orientation can be added later if needed.
+
+\section*{Inverse Kinematics Strategy}
+\subsection*{Stage 1: solve yaw analytically}
+Given the desired point \(p_{\text{goal}} = [x, y, z]^T\),
+\[
+\psi = \operatorname{atan2}(y, x)
+\]
+
+\subsection*{Stage 2: reduce to the pitch-extension plane}
+Project the target into the yaw-aligned 2D plane:
+\[
+r = \sqrt{x^2 + y^2}
+\]
+Then solve for \(a\) and \(\theta\) using the turret planar geometry.
+
+\subsection*{Stage 3: planar IK}
+Two practical options:
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Analytic IK:} if the final FK expression is simple and well-conditioned.
+  \item \textbf{Numerical IK:} use nonlinear least squares on \((a, \theta)\) with planar FK.
+\end{itemize}
+
+For the current system, numerical planar IK is likely the fastest robust path because:
+\begin{itemize}[leftmargin=1.5em]
+  \item the real mechanism already has offsets and backoff behavior,
+  \item measured tag position can be used directly to close the loop,
+  \item the numerical method tolerates modest model error better.
+\end{itemize}
+
+\subsection*{Recommended first IK objective}
+Given measured or desired target position \(p_{\text{goal}}\), solve:
+\[
+\min_{\psi,\theta,a} \left\| FK(\psi,\theta,a) - p_{\text{goal}} \right\|^2
+\]
+subject to mechanical limits:
+\[
+\psi_{\min} \le \psi \le \psi_{\max}, \quad
+\theta_{\min} \le \theta \le \theta_{\max}, \quad
+a_{\min} \le a \le a_{\max}
+\]
+
+\section*{Why Closed-Loop IK Is Preferred}
+The real turret is not perfectly modeled:
+\begin{itemize}[leftmargin=1.5em]
+  \item pitch cable compliance,
+  \item friction and stiction,
+  \item gravity on the spiral zipper,
+  \item backlash and deadband,
+  \item camera extrinsic errors,
+  \item AprilTag mounting offset.
+\end{itemize}
+
+Closed-loop vision feedback turns these into correctable residuals instead of requiring exact open-loop modeling.
+
+\section*{What Must Be Measured}
+Before full vision-guided IK will work well, measure:
+\begin{itemize}[leftmargin=1.5em]
+  \item AprilTag physical edge size in meters,
+  \item tag center offset from the true end-effector point,
+  \item camera pose relative to turret base,
+  \item pitch pivot location relative to \texttt{base\_link},
+  \item turret joint limits and safe stand-off to the camera.
+\end{itemize}
+
+\section*{Safety and Operating Constraints}
+\begin{itemize}[leftmargin=1.5em]
+  \item The camera goal position should not be the camera optical center. Use a safe desired stand-off distance.
+  \item Enforce minimum and maximum extension, pitch, and yaw.
+  \item Reject IK outputs that move through hard limits or singular regions.
+  \item Start with low-speed motion and software clamps.
+  \item Use filtered vision measurements to avoid jitter from single-frame AprilTag noise.
+\end{itemize}
+
+\section*{Implementation Milestones}
+\begin{enumerate}[leftmargin=1.7em]
+  \item Bring up camera on Pi 2 and verify image stream.
+  \item Calibrate camera intrinsics and save a stable calibration file.
+  \item Run AprilTag detection and verify \(T_{\text{camera}\_\text{tag}}\).
+  \item Define \texttt{tag\_link} to \texttt{end\_effector} offset.
+  \item Measure and publish \(T_{\text{base}\_\text{camera}}\).
+  \item Publish measured \(T_{\text{base}\_\text{ee}}\).
+  \item Implement FK on Pi 1 and compare predicted versus measured end-effector position.
+  \item Implement IK for position-only control.
+  \item Add slow closed-loop motion to a fixed goal.
+  \item Improve filtering, clamping, and convergence behavior.
+\end{enumerate}
+
+\section*{Recommended First Working Version}
+The first practical version should use:
+\begin{itemize}[leftmargin=1.5em]
+  \item one fixed camera,
+  \item one AprilTag on the end effector,
+  \item position-only tracking,
+  \item closed-loop IK updates at a modest rate,
+  \item existing turret low-level actuation as the inner loop.
+\end{itemize}
+
+This gives a direct path to a functional visual servoing system without solving the full orientation-control problem up front.
+
+\end{document}

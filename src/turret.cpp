@@ -322,7 +322,7 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   } else {
     zipper_velocity = std::clamp(zipper_velocity, kMinCommandVelocity, kMaxCommandVelocity);
   }
-  constexpr double kMinTrackingZipperVelocity = 0.9;
+  constexpr double kMinTrackingZipperVelocity = 1.5;
   const double reference_zipper_speed = std::max(
       kMinTrackingZipperVelocity,
       std::min(kMaxCommandVelocity, std::fabs(reference_extension_velocity) * 80.0 + 0.30));

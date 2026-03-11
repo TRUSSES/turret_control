@@ -63,7 +63,8 @@ public:
         this->declare_parameter("zero_velocity", -0.2);
         this->declare_parameter("docking_standoff_m", 0.30);
         this->declare_parameter("docking_extension_max_m", 0.90);
-        this->declare_parameter("docking_pitch_limit_deg", 50.0);
+        this->declare_parameter("docking_pitch_limit_deg", 60.0);
+        this->declare_parameter("docking_pitch_hold_cap_deg", 50.0);
         this->declare_parameter("docking_command_velocity", 1.5);
         this->declare_parameter("docking_stage_extension_m", 0.05);
         this->declare_parameter("docking_stage_pitch_deg", 25.0);
@@ -75,6 +76,9 @@ public:
         this->declare_parameter("docking_lateral_tolerance_m", 0.05);
         this->declare_parameter("docking_hold_on_lateral_error", false);
         this->declare_parameter("docking_lock_goal_camera_y_on_stage_complete", true);
+        this->declare_parameter("docking_goal_camera_y_offset_m", -0.10);
+        this->declare_parameter("docking_stop_on_close_tracking_loss", true);
+        this->declare_parameter("docking_tracking_loss_stop_distance_m", 0.25);
         this->declare_parameter("docking_camera_forward_sign", 1.0);
         this->declare_parameter("docking_camera_vertical_sign", 1.0);
         this->declare_parameter("docking_visual_extension_kp", 0.8);
@@ -82,14 +86,15 @@ public:
         this->declare_parameter("docking_visual_max_extension_rate_mps", 0.12);
         this->declare_parameter("docking_visual_max_pitch_rate_deg_s", 35.0);
         this->declare_parameter("docking_visual_distance_deadband_m", 0.01);
-        this->declare_parameter("docking_visual_vertical_deadband_m", 0.005);
+        this->declare_parameter("docking_visual_vertical_deadband_m", 0.01);
         this->declare_parameter("docking_visual_command_period_sec", 0.25);
+        this->declare_parameter("docking_visual_pitch_command_horizon_sec", 0.25);
         this->declare_parameter("docking_visual_extension_step_max_m", 0.08);
         this->declare_parameter("docking_visual_pitch_step_max_deg", 8.0);
         this->declare_parameter("docking_visual_slowdown_start_m", 0.30);
         this->declare_parameter("docking_visual_near_goal_scale", 0.25);
         this->declare_parameter("docking_visual_vertical_priority_error_m", 0.02);
-        this->declare_parameter("docking_visual_pitch_limit_guard_deg", 5.0);
+        this->declare_parameter("docking_visual_pitch_limit_guard_deg", 15.0);
         
         // Load configuration - try different paths
         std::vector<std::string> config_paths = {
@@ -157,6 +162,15 @@ public:
             if (docking["lock_goal_camera_y_on_stage_complete"]) {
                 this->set_parameter(rclcpp::Parameter("docking_lock_goal_camera_y_on_stage_complete", docking["lock_goal_camera_y_on_stage_complete"].as<bool>()));
             }
+            if (docking["goal_camera_y_offset_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_goal_camera_y_offset_m", docking["goal_camera_y_offset_m"].as<double>()));
+            }
+            if (docking["stop_on_close_tracking_loss"]) {
+                this->set_parameter(rclcpp::Parameter("docking_stop_on_close_tracking_loss", docking["stop_on_close_tracking_loss"].as<bool>()));
+            }
+            if (docking["tracking_loss_stop_distance_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_tracking_loss_stop_distance_m", docking["tracking_loss_stop_distance_m"].as<double>()));
+            }
             if (docking["camera_forward_sign"]) {
                 this->set_parameter(rclcpp::Parameter("docking_camera_forward_sign", docking["camera_forward_sign"].as<double>()));
             }
@@ -183,6 +197,9 @@ public:
             }
             if (docking["visual_command_period_sec"]) {
                 this->set_parameter(rclcpp::Parameter("docking_visual_command_period_sec", docking["visual_command_period_sec"].as<double>()));
+            }
+            if (docking["visual_pitch_command_horizon_sec"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_pitch_command_horizon_sec", docking["visual_pitch_command_horizon_sec"].as<double>()));
             }
             if (docking["visual_extension_step_max_m"]) {
                 this->set_parameter(rclcpp::Parameter("docking_visual_extension_step_max_m", docking["visual_extension_step_max_m"].as<double>()));
@@ -374,7 +391,8 @@ private:
     bool have_camera_estimate_ = false;
     double docking_standoff_m_ = 0.30;
     double docking_extension_max_m_ = 0.90;
-    double docking_pitch_limit_rad_ = 50.0 * M_PI / 180.0;
+    double docking_pitch_limit_rad_ = 60.0 * M_PI / 180.0;
+    double docking_pitch_hold_cap_rad_ = 50.0 * M_PI / 180.0;
     double docking_command_velocity_ = 1.5;
     double docking_stage_extension_m_ = 0.05;
     double docking_stage_pitch_rad_ = 25.0 * M_PI / 180.0;
@@ -387,6 +405,9 @@ private:
     double docking_lateral_tolerance_m_ = 0.05;
     bool docking_hold_on_lateral_error_ = false;
     bool docking_lock_goal_camera_y_on_stage_complete_ = true;
+    double docking_goal_camera_y_offset_m_ = -0.10;
+    bool docking_stop_on_close_tracking_loss_ = true;
+    double docking_tracking_loss_stop_distance_m_ = 0.25;
     double docking_camera_forward_sign_ = 1.0;
     double docking_camera_vertical_sign_ = 1.0;
     double docking_visual_extension_kp_ = 0.8;
@@ -394,14 +415,16 @@ private:
     double docking_visual_max_extension_rate_mps_ = 0.12;
     double docking_visual_max_pitch_rate_radps_ = 35.0 * M_PI / 180.0;
     double docking_visual_distance_deadband_m_ = 0.01;
-    double docking_visual_vertical_deadband_m_ = 0.005;
+    double docking_visual_vertical_deadband_m_ = 0.01;
     double docking_visual_command_period_sec_ = 0.25;
+    double docking_visual_pitch_command_horizon_sec_ = 0.25;
     double docking_visual_extension_step_max_m_ = 0.08;
     double docking_visual_pitch_step_max_rad_ = 8.0 * M_PI / 180.0;
     double docking_visual_slowdown_start_m_ = 0.30;
     double docking_visual_near_goal_scale_ = 0.25;
     double docking_visual_vertical_priority_error_m_ = 0.02;
-    double docking_visual_pitch_limit_guard_rad_ = 5.0 * M_PI / 180.0;
+    double docking_visual_pitch_limit_guard_rad_ = 15.0 * M_PI / 180.0;
+    bool docking_stopped_on_tracking_loss_ = false;
     double estimated_camera_x_base_ = 0.0;
     double estimated_camera_y_base_ = 0.0;
     double docking_goal_camera_y_m_ = 0.0;
@@ -841,25 +864,49 @@ private:
 
             docking_stage_active_ = false;
             have_camera_estimate_ = false;
-            if (docking_lock_goal_camera_y_on_stage_complete_ && vision_tag_visible_) {
-                docking_goal_camera_y_m_ = latest_tag_pose_camera_.pose.position.y;
-            } else {
-                docking_goal_camera_y_m_ = 0.0;
-            }
+            docking_stopped_on_tracking_loss_ = false;
+            const double stage_camera_y =
+                (docking_lock_goal_camera_y_on_stage_complete_ && vision_tag_visible_)
+                    ? latest_tag_pose_camera_.pose.position.y
+                    : 0.0;
+            docking_goal_camera_y_m_ = stage_camera_y + docking_goal_camera_y_offset_m_;
             docking_last_servo_update_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
             RCLCPP_INFO(this->get_logger(),
-                "Docking stage complete at ext=%.3f m pitch=%.2f deg (tag_visible=%s, goal_cam_y=%.3f m) - switching to vision-guided docking",
+                "Docking stage complete at ext=%.3f m pitch=%.2f deg (tag_visible=%s, stage_cam_y=%.3f m, goal_cam_y=%.3f m) - switching to vision-guided docking",
                 current_extension_, current_pitch_angle_ * 180.0 / M_PI,
                 vision_tag_visible_ ? "true" : "false",
+                stage_camera_y,
                 docking_goal_camera_y_m_);
         }
 
         const double pose_age = (this->now() - latest_tag_pose_time_).seconds();
+        const bool close_to_camera =
+            latest_tag_pose_time_.nanoseconds() != 0 &&
+            latest_tag_pose_camera_.pose.position.z <= docking_tracking_loss_stop_distance_m_;
+        if (docking_stopped_on_tracking_loss_) {
+            desired_length_ = current_extension_;
+            desired_pitch_angle_ = current_pitch_angle_;
+            desired_velocity_ = 0.0;
+            hold_current_pitch_ = true;
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Docking is latched stopped after close-range tracking loss. Re-arm DOCKING to continue.");
+            return;
+        }
         if (!vision_tag_visible_ || pose_age > docking_pose_timeout_sec_) {
             desired_length_ = current_extension_;
             desired_pitch_angle_ = current_pitch_angle_;
             desired_velocity_ = 0.0;
             hold_current_pitch_ = true;
+            if (docking_stop_on_close_tracking_loss_ && close_to_camera) {
+                docking_stopped_on_tracking_loss_ = true;
+                RCLCPP_WARN(this->get_logger(),
+                    "Docking stopped due to close-range tracking loss (visible=%s age=%.3f s last_z=%.3f m <= %.3f m).",
+                    vision_tag_visible_ ? "true" : "false",
+                    pose_age,
+                    latest_tag_pose_camera_.pose.position.z,
+                    docking_tracking_loss_stop_distance_m_);
+                return;
+            }
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                 "Docking active but no fresh vision pose available (visible=%s age=%.3f s)",
                 vision_tag_visible_ ? "true" : "false", pose_age);
@@ -918,6 +965,15 @@ private:
             -docking_visual_max_pitch_rate_radps_,
             docking_visual_max_pitch_rate_radps_);
 
+        const bool prioritize_extension_over_pitch =
+            z_error > 0.05 && std::fabs(y_error) <= docking_visual_vertical_priority_error_m_;
+        if (prioritize_extension_over_pitch) {
+            pitch_rate_cmd = 0.0;
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Docking: vertical error %.3f m is small while depth error %.3f m remains; holding pitch and prioritizing extension.",
+                y_error, z_error);
+        }
+
         double near_goal_scale = 1.0;
         if (docking_visual_slowdown_start_m_ > docking_standoff_m_ && z_cam < docking_visual_slowdown_start_m_) {
             const double normalized = std::clamp(
@@ -943,15 +999,44 @@ private:
             current_pitch_angle_ >= (docking_pitch_limit_rad_ - docking_visual_pitch_limit_guard_rad_);
         const bool near_negative_pitch_limit =
             current_pitch_angle_ <= (-docking_pitch_limit_rad_ + docking_visual_pitch_limit_guard_rad_);
+        double pitch_limit_scale = 1.0;
+        if (pitch_rate_cmd > 0.0) {
+            const double remaining_margin = docking_pitch_limit_rad_ - current_pitch_angle_;
+            pitch_limit_scale = std::clamp(
+                remaining_margin / std::max(1e-6, docking_visual_pitch_limit_guard_rad_),
+                0.0,
+                1.0);
+        } else if (pitch_rate_cmd < 0.0) {
+            const double remaining_margin = current_pitch_angle_ + docking_pitch_limit_rad_;
+            pitch_limit_scale = std::clamp(
+                remaining_margin / std::max(1e-6, docking_visual_pitch_limit_guard_rad_),
+                0.0,
+                1.0);
+        }
+        if (pitch_rate_cmd > 0.0 && current_pitch_angle_ >= docking_pitch_hold_cap_rad_) {
+            pitch_rate_cmd = 0.0;
+            pitch_limit_scale = 0.0;
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Docking: holding pitch at configured cap %.1f deg while continuing extension.",
+                docking_pitch_hold_cap_rad_ * 180.0 / M_PI);
+        }
         if ((near_positive_pitch_limit && pitch_rate_cmd > 0.0) ||
             (near_negative_pitch_limit && pitch_rate_cmd < 0.0)) {
-            extension_scale = 0.0;
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "Docking: pitch is near its limit with unresolved vertical error; pausing extension to preserve tag visibility.");
+            if (std::fabs(y_error) > docking_visual_vertical_priority_error_m_) {
+                extension_scale = 0.0;
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "Docking: pitch is near its limit with unresolved vertical error; pausing extension to preserve tag visibility.");
+            } else {
+                pitch_rate_cmd = 0.0;
+                pitch_limit_scale = 0.0;
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "Docking: pitch is near its limit but vertical error is small; holding pitch and continuing extension.");
+            }
         }
 
         extension_rate_cmd *= extension_scale;
         pitch_rate_cmd *= (0.6 + 0.4 * near_goal_scale);
+        pitch_rate_cmd *= pitch_limit_scale;
 
         double extension_step_limit = docking_visual_extension_step_max_m_;
         if (z_cam < docking_visual_slowdown_start_m_) {
@@ -967,6 +1052,7 @@ private:
         if (z_cam < docking_visual_slowdown_start_m_) {
             pitch_step_limit *= (0.5 + 0.5 * near_goal_scale);
         }
+        pitch_step_limit *= std::max(0.25, pitch_limit_scale);
         pitch_step_limit = std::clamp(
             pitch_step_limit,
             1.0 * M_PI / 180.0,
@@ -976,8 +1062,12 @@ private:
             extension_rate_cmd * servo_dt,
             -extension_step_limit,
             extension_step_limit);
+        const double pitch_dt = std::clamp(
+            docking_visual_pitch_command_horizon_sec_,
+            0.05,
+            servo_dt);
         const double pitch_step = std::clamp(
-            pitch_rate_cmd * servo_dt,
+            pitch_rate_cmd * pitch_dt,
             -pitch_step_limit,
             pitch_step_limit);
 
@@ -989,6 +1079,7 @@ private:
             current_pitch_angle_ + pitch_step,
             -docking_pitch_limit_rad_,
             docking_pitch_limit_rad_);
+        desired_pitch_angle_ = std::min(desired_pitch_angle_, docking_pitch_hold_cap_rad_);
         desired_velocity_ = std::max(docking_command_velocity_, 1.5);
         hold_current_pitch_ = false;
 
@@ -1274,6 +1365,12 @@ private:
                     docking_standoff_m_ = this->get_parameter("docking_standoff_m").as_double();
                     docking_extension_max_m_ = this->get_parameter("docking_extension_max_m").as_double();
                     docking_pitch_limit_rad_ = this->get_parameter("docking_pitch_limit_deg").as_double() * M_PI / 180.0;
+                    docking_pitch_hold_cap_rad_ =
+                        this->get_parameter("docking_pitch_hold_cap_deg").as_double() * M_PI / 180.0;
+                    docking_pitch_hold_cap_rad_ = std::clamp(
+                        docking_pitch_hold_cap_rad_,
+                        0.0,
+                        docking_pitch_limit_rad_);
                     docking_command_velocity_ = this->get_parameter("docking_command_velocity").as_double();
                     docking_stage_extension_m_ = this->get_parameter("docking_stage_extension_m").as_double();
                     docking_stage_pitch_rad_ = this->get_parameter("docking_stage_pitch_deg").as_double() * M_PI / 180.0;
@@ -1286,6 +1383,12 @@ private:
                     docking_hold_on_lateral_error_ = this->get_parameter("docking_hold_on_lateral_error").as_bool();
                     docking_lock_goal_camera_y_on_stage_complete_ =
                         this->get_parameter("docking_lock_goal_camera_y_on_stage_complete").as_bool();
+                    docking_goal_camera_y_offset_m_ =
+                        this->get_parameter("docking_goal_camera_y_offset_m").as_double();
+                    docking_stop_on_close_tracking_loss_ =
+                        this->get_parameter("docking_stop_on_close_tracking_loss").as_bool();
+                    docking_tracking_loss_stop_distance_m_ =
+                        this->get_parameter("docking_tracking_loss_stop_distance_m").as_double();
                     docking_camera_forward_sign_ = this->get_parameter("docking_camera_forward_sign").as_double();
                     docking_camera_vertical_sign_ = this->get_parameter("docking_camera_vertical_sign").as_double();
                     docking_visual_extension_kp_ = this->get_parameter("docking_visual_extension_kp").as_double();
@@ -1300,6 +1403,8 @@ private:
                         this->get_parameter("docking_visual_vertical_deadband_m").as_double();
                     docking_visual_command_period_sec_ =
                         this->get_parameter("docking_visual_command_period_sec").as_double();
+                    docking_visual_pitch_command_horizon_sec_ =
+                        this->get_parameter("docking_visual_pitch_command_horizon_sec").as_double();
                     docking_visual_extension_step_max_m_ =
                         this->get_parameter("docking_visual_extension_step_max_m").as_double();
                     docking_visual_pitch_step_max_rad_ =
@@ -1314,6 +1419,7 @@ private:
                         this->get_parameter("docking_visual_pitch_limit_guard_deg").as_double() * M_PI / 180.0;
                     docking_enabled_ = true;
                     docking_stage_active_ = true;
+                    docking_stopped_on_tracking_loss_ = false;
                     have_camera_estimate_ = false;
                     docking_goal_camera_y_m_ = 0.0;
                     docking_last_servo_update_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
@@ -1321,18 +1427,23 @@ private:
                     response->success = true;
                     response->message = "State changed to DOCKING";
                     RCLCPP_INFO(this->get_logger(),
-                        "Docking armed: standoff=%.3f m, extension_max=%.3f m, pitch_limit=%.1f deg, stage=[ext=%.3f m pitch=%.1f deg min_pitch=%.1f deg], lateral_hold=%s lock_goal_cam_y=%s, visual_gains=[ext=%.2f pitch=%.2f max_ext=%.2f m/s max_pitch=%.1f deg/s period=%.2f s step_ext=%.3f m step_pitch=%.1f deg slowdown_start=%.2f m near_scale=%.2f priority_err=%.3f m], camera_signs=[forward=%.1f vertical=%.1f]",
+                        "Docking armed: standoff=%.3f m, extension_max=%.3f m, pitch_limit=%.1f deg, pitch_hold_cap=%.1f deg, stage=[ext=%.3f m pitch=%.1f deg min_pitch=%.1f deg], lateral_hold=%s lock_goal_cam_y=%s offset_y=%.3f m stop_on_loss=%s loss_stop_dist=%.2f m, visual_gains=[ext=%.2f pitch=%.2f max_ext=%.2f m/s max_pitch=%.1f deg/s period=%.2f s pitch_horizon=%.2f s step_ext=%.3f m step_pitch=%.1f deg slowdown_start=%.2f m near_scale=%.2f priority_err=%.3f m], camera_signs=[forward=%.1f vertical=%.1f]",
                         docking_standoff_m_, docking_extension_max_m_,
                         docking_pitch_limit_rad_ * 180.0 / M_PI,
+                        docking_pitch_hold_cap_rad_ * 180.0 / M_PI,
                         docking_stage_extension_m_, docking_stage_pitch_rad_ * 180.0 / M_PI,
                         docking_stage_min_pitch_rad_ * 180.0 / M_PI,
                         docking_hold_on_lateral_error_ ? "true" : "false",
                         docking_lock_goal_camera_y_on_stage_complete_ ? "true" : "false",
+                        docking_goal_camera_y_offset_m_,
+                        docking_stop_on_close_tracking_loss_ ? "true" : "false",
+                        docking_tracking_loss_stop_distance_m_,
                         docking_visual_extension_kp_,
                         docking_visual_pitch_kp_,
                         docking_visual_max_extension_rate_mps_,
                         docking_visual_max_pitch_rate_radps_ * 180.0 / M_PI,
                         docking_visual_command_period_sec_,
+                        docking_visual_pitch_command_horizon_sec_,
                         docking_visual_extension_step_max_m_,
                         docking_visual_pitch_step_max_rad_ * 180.0 / M_PI,
                         docking_visual_slowdown_start_m_,

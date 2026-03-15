@@ -24,6 +24,12 @@ Turret::Turret(const YAML::Node &node)
                                                            : 0.0),
       pitch_motor_length_zero_angle_rad_(0.0),
       pitch_motor_cable_zero_length_m_(0.0) {
+  if (node["docking"] && node["docking"]["final_insertion_pitch_motor_velocity_rad_s"]) {
+    final_insertion_pitch_motor_velocity_radps_ = std::clamp(
+        node["docking"]["final_insertion_pitch_motor_velocity_rad_s"].as<double>(),
+        0.0,
+        max_omega_rad_);
+  }
   // Initialize Pi3Hat for all Cubemars motors
   mjbots::pi3hat::Pi3Hat::Configuration pi3hat_config;
   pi3hat_config.can[4].slow_bitrate = 1000000;
@@ -345,6 +351,7 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
 
   constexpr double kPitchHoldDeadband = 0.008726646259971648;  // 0.5 deg
   constexpr double kSmallPitchCmd = 0.005;
+  constexpr double kMinTrackingPitchVelocity = 0.20;  // rad/s ~= 11.5 deg/s
 
   double pitch_feedback_cmd = 0.0;
   if (std::fabs(pitch_error) > kPitchHoldDeadband) {
@@ -355,6 +362,13 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
       reference_pitch_velocity + pitch_feedback_cmd,
       -max_omega_rad_,
       max_omega_rad_);
+
+  if (!hold_pitch && std::fabs(goal_pitch_error) > 0.01 &&
+      std::fabs(desired_pitch_motor_velocity) > kSmallPitchCmd &&
+      std::fabs(desired_pitch_motor_velocity) < kMinTrackingPitchVelocity) {
+    desired_pitch_motor_velocity =
+        std::copysign(kMinTrackingPitchVelocity, desired_pitch_motor_velocity);
+  }
 
   // The pitch limit switch is only a stop in the direction that drove into it during zeroing.
   if (turret_limit_pressed && desired_pitch_motor_velocity < 0.0) {
@@ -367,7 +381,10 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   last_turret_limit_pressed = turret_limit_pressed;
 
   const bool final_zipper_reached = std::fabs(goal_zipper_error) < 0.001;
-  const bool final_pitch_reached = std::fabs(goal_pitch_error) < 0.03;
+  // Keep the low-level "done" tolerance tighter than the stage handoff tolerance,
+  // otherwise the stage can wait for more pitch while the motor controller has
+  // already decided it is finished and gone idle.
+  const bool final_pitch_reached = std::fabs(goal_pitch_error) < 0.01;
   if (final_zipper_reached && final_pitch_reached &&
       std::fabs(desired_pitch_motor_velocity) < kSmallPitchCmd) {
     desired_pitch_motor_velocity = 0.0;
@@ -398,6 +415,63 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   ResetCoordinatedTrajectory(zipper_extension, current_pitch_angle);
   pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
   return true;
+}
+
+bool Turret::ActuateFinalInsertionFreePitch(float goal_dist, float max_zipper_velocity) {
+  if (!pitch_motor_) {
+    std::cerr << "ActuateFinalInsertionFreePitch aborted: pitch motor unavailable" << std::endl;
+    return false;
+  }
+
+  turret_encoder_.Update();
+  spiral_zipper_.UpdateEncoder();
+
+  const double current_pitch_angle = GetPitchAngle();
+  const double zipper_extension = spiral_zipper_.GetExtension();
+  const double goal_zipper_error = goal_dist - zipper_extension;
+
+  constexpr double kMinCommandVelocity = 0.03;
+  constexpr double kMaxCommandVelocity = 2.0;
+  constexpr double kFinalInsertionPitchVelocityKd = 2.0;
+  double zipper_velocity = std::abs(max_zipper_velocity);
+  if (zipper_velocity <= 0.0) {
+    zipper_velocity = kMaxCommandVelocity;
+  } else {
+    zipper_velocity = std::clamp(zipper_velocity, kMinCommandVelocity, kMaxCommandVelocity);
+  }
+
+  if (std::fabs(goal_zipper_error) < 0.001) {
+    spiral_zipper_.ActuateLength(goal_dist, zipper_velocity);
+    pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, kFinalInsertionPitchVelocityKd, 0.0);
+    return true;
+  }
+
+  spiral_zipper_.ActuateLength(goal_dist, zipper_velocity);
+
+  double pitch_release_velocity = 0.0;
+  if (goal_zipper_error > 0.0) {
+    pitch_release_velocity = final_insertion_pitch_motor_velocity_radps_;
+  }
+
+  const bool turret_limit_pressed = turret_limit_switch_.IsPressed();
+  if (turret_limit_pressed && pitch_release_velocity > 0.0) {
+    pitch_release_velocity = 0.0;
+  }
+
+  pitch_motor_->sendCommandMITMode(0.0, pitch_release_velocity, 0.0, kFinalInsertionPitchVelocityKd, 0.0);
+
+  static int active_log_counter = 0;
+  ++active_log_counter;
+  if (active_log_counter % 100 == 0) {
+    std::cout << "ActuateFinalInsertionFreePitch: pitch="
+              << (current_pitch_angle * 180.0 / M_PI) << " deg, ext="
+              << zipper_extension << " m, goal_ext=" << goal_dist
+              << " m, pitch_motor_vel="
+              << pitch_release_velocity
+              << " rad/s, pitch_release_cmd="
+              << (pitch_release_velocity * 180.0 / M_PI) << " deg/s" << std::endl;
+  }
+  return false;
 }
 
 void Turret::ZeroSpiralZipper() {
@@ -462,6 +536,13 @@ bool Turret::ZeroTurret(double retract_velocity, double pitch_velocity_ratio) {
   bool waiting_for_sz_after_pitch_limit = false;
 
   while (!sz_zeroed || !pitch_zeroed) {
+    if (zero_abort_requested_.load()) {
+      spiral_zipper_.Stop();
+      pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
+      std::cout << "ZeroTurret aborted by stop request" << std::endl;
+      return false;
+    }
+
     ++loop_counter;
     float current_pitch_vel = pitch_motor_->getVelocity();
     float current_pitch_pos = pitch_motor_->getPosition();
@@ -535,6 +616,13 @@ bool Turret::ZeroTurret(double retract_velocity, double pitch_velocity_ratio) {
   const auto backoff_deadline = std::chrono::steady_clock::now() + kBackoffTimeout;
 
   while (std::chrono::steady_clock::now() < backoff_deadline) {
+    if (zero_abort_requested_.load()) {
+      spiral_zipper_.Stop();
+      pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
+      std::cout << "ZeroTurret backoff aborted by stop request" << std::endl;
+      return false;
+    }
+
     turret_encoder_.Update();
     spiral_zipper_.UpdateEncoder();
     spiral_zipper_.UpdateMotor();
@@ -701,6 +789,14 @@ void Turret::StopAllMotors() {
   if (yaw_motor_) {
     yaw_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
   }
+}
+
+void Turret::RequestZeroAbort() {
+  zero_abort_requested_.store(true);
+}
+
+void Turret::ClearZeroAbort() {
+  zero_abort_requested_.store(false);
 }
 
 void Turret::ZeroPitchEncoder() {

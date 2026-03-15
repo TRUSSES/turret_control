@@ -5,6 +5,7 @@
 #include "encoder.h"
 #include "limit_switch.h"
 #include "spiral_zipper.h"
+#include <atomic>
 #include <yaml-cpp/yaml.h>
 #include <chrono>
 #include <memory>
@@ -19,6 +20,7 @@ class Turret {
   void Init();
   bool ActuateTurretCable(float goal_dist, float desired_pitch_rad, float max_zipper_velocity,
                          bool hold_pitch = false, bool prioritize_pitch = false);
+  bool ActuateFinalInsertionFreePitch(float goal_dist, float max_zipper_velocity);
   void Update();
   
   // Spiral zipper control methods for ROS2 integration
@@ -50,6 +52,8 @@ class Turret {
   void SetPitchVelocity(double velocity);
   void SetYawVelocity(double velocity);
   void StopAllMotors();
+  void RequestZeroAbort();
+  void ClearZeroAbort();
 
   // Zeroing methods for teleop zero mode
   void ZeroPitchEncoder();          // Capture turret encoder reference at limit switch
@@ -92,6 +96,7 @@ class Turret {
   const double max_zipper_rate_coupled_ = 2.0;
   const double pitch_coupling_gain_ = 0.35;
   const double jacobian_damping_ = 0.02;
+  double final_insertion_pitch_motor_velocity_radps_ = 1.5;
 
   double GetPitchCableLength() const;
   void CapturePitchCableReferenceAtCurrentPose();
@@ -131,6 +136,7 @@ class Turret {
   double estimated_zipper_speed_mps_ = 0.04;
   double last_extension_sample_m_ = 0.0;
   bool have_last_extension_sample_ = false;
+  std::atomic<bool> zero_abort_requested_{false};
   std::chrono::steady_clock::time_point coordinated_trajectory_last_update_;
   std::chrono::steady_clock::time_point last_extension_sample_time_;
 };

@@ -64,13 +64,15 @@ public:
         this->declare_parameter("docking_standoff_m", 0.30);
         this->declare_parameter("docking_extension_max_m", 0.90);
         this->declare_parameter("docking_pitch_limit_deg", 60.0);
-        this->declare_parameter("docking_pitch_hold_cap_deg", 50.0);
+        this->declare_parameter("docking_pitch_hold_cap_deg", 60.0);
         this->declare_parameter("docking_command_velocity", 1.5);
         this->declare_parameter("docking_stage_extension_m", 0.05);
         this->declare_parameter("docking_stage_pitch_deg", 25.0);
         this->declare_parameter("docking_stage_pitch_tolerance_deg", 3.0);
         this->declare_parameter("docking_stage_min_pitch_deg", 18.0);
         this->declare_parameter("docking_stage_extension_tolerance_m", 0.005);
+        this->declare_parameter("docking_acquire_extension_m", 0.04);
+        this->declare_parameter("docking_acquire_vertical_tolerance_m", 0.03);
         this->declare_parameter("docking_camera_filter_alpha", 0.2);
         this->declare_parameter("docking_pose_timeout_sec", 0.5);
         this->declare_parameter("docking_lateral_tolerance_m", 0.05);
@@ -94,7 +96,17 @@ public:
         this->declare_parameter("docking_visual_slowdown_start_m", 0.30);
         this->declare_parameter("docking_visual_near_goal_scale", 0.25);
         this->declare_parameter("docking_visual_vertical_priority_error_m", 0.02);
+        this->declare_parameter("docking_visual_vertical_hold_error_m", 0.05);
         this->declare_parameter("docking_visual_pitch_limit_guard_deg", 15.0);
+        this->declare_parameter("docking_final_insertion_enabled", true);
+        this->declare_parameter("docking_final_insertion_trigger_distance_m", 0.20);
+        this->declare_parameter("docking_final_insertion_vertical_tolerance_m", 0.03);
+        this->declare_parameter("docking_final_insertion_extension_m", 0.30);
+        this->declare_parameter("docking_final_insertion_velocity", 1.5);
+        this->declare_parameter("docking_final_insertion_completion_tolerance_m", 0.01);
+        this->declare_parameter("docking_final_insertion_pitch_tolerance_deg", 2.0);
+        this->declare_parameter("docking_final_insertion_pitch_bias_deg", 5.0);
+        this->declare_parameter("docking_final_insertion_settle_sec", 1.0);
         
         // Load configuration - try different paths
         std::vector<std::string> config_paths = {
@@ -146,6 +158,12 @@ public:
             }
             if (docking["stage_extension_tolerance_m"]) {
                 this->set_parameter(rclcpp::Parameter("docking_stage_extension_tolerance_m", docking["stage_extension_tolerance_m"].as<double>()));
+            }
+            if (docking["acquire_extension_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_acquire_extension_m", docking["acquire_extension_m"].as<double>()));
+            }
+            if (docking["acquire_vertical_tolerance_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_acquire_vertical_tolerance_m", docking["acquire_vertical_tolerance_m"].as<double>()));
             }
             if (docking["camera_filter_alpha"]) {
                 this->set_parameter(rclcpp::Parameter("docking_camera_filter_alpha", docking["camera_filter_alpha"].as<double>()));
@@ -216,8 +234,38 @@ public:
             if (docking["visual_vertical_priority_error_m"]) {
                 this->set_parameter(rclcpp::Parameter("docking_visual_vertical_priority_error_m", docking["visual_vertical_priority_error_m"].as<double>()));
             }
+            if (docking["visual_vertical_hold_error_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_visual_vertical_hold_error_m", docking["visual_vertical_hold_error_m"].as<double>()));
+            }
             if (docking["visual_pitch_limit_guard_deg"]) {
                 this->set_parameter(rclcpp::Parameter("docking_visual_pitch_limit_guard_deg", docking["visual_pitch_limit_guard_deg"].as<double>()));
+            }
+            if (docking["final_insertion_enabled"]) {
+                this->set_parameter(rclcpp::Parameter("docking_final_insertion_enabled", docking["final_insertion_enabled"].as<bool>()));
+            }
+            if (docking["final_insertion_trigger_distance_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_final_insertion_trigger_distance_m", docking["final_insertion_trigger_distance_m"].as<double>()));
+            }
+            if (docking["final_insertion_vertical_tolerance_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_final_insertion_vertical_tolerance_m", docking["final_insertion_vertical_tolerance_m"].as<double>()));
+            }
+            if (docking["final_insertion_extension_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_final_insertion_extension_m", docking["final_insertion_extension_m"].as<double>()));
+            }
+            if (docking["final_insertion_velocity"]) {
+                this->set_parameter(rclcpp::Parameter("docking_final_insertion_velocity", docking["final_insertion_velocity"].as<double>()));
+            }
+            if (docking["final_insertion_completion_tolerance_m"]) {
+                this->set_parameter(rclcpp::Parameter("docking_final_insertion_completion_tolerance_m", docking["final_insertion_completion_tolerance_m"].as<double>()));
+            }
+            if (docking["final_insertion_pitch_tolerance_deg"]) {
+                this->set_parameter(rclcpp::Parameter("docking_final_insertion_pitch_tolerance_deg", docking["final_insertion_pitch_tolerance_deg"].as<double>()));
+            }
+            if (docking["final_insertion_pitch_bias_deg"]) {
+                this->set_parameter(rclcpp::Parameter("docking_final_insertion_pitch_bias_deg", docking["final_insertion_pitch_bias_deg"].as<double>()));
+            }
+            if (docking["final_insertion_settle_sec"]) {
+                this->set_parameter(rclcpp::Parameter("docking_final_insertion_settle_sec", docking["final_insertion_settle_sec"].as<double>()));
             }
         }
 
@@ -348,7 +396,21 @@ public:
     ~TurretROS2Node()
     {
         RCLCPP_INFO(this->get_logger(), "Shutting down turret node");
+        if (turret_) {
+            turret_->RequestZeroAbort();
+            turret_->StopAllMotors();
+        }
         // pigpio is terminated in main() after all nodes are destroyed
+    }
+
+    void emergencyStop()
+    {
+        if (turret_) {
+            turret_->RequestZeroAbort();
+            turret_->StopAllMotors();
+        }
+        desired_velocity_ = 0.0;
+        hold_current_pitch_ = true;
     }
 
 private:
@@ -392,7 +454,7 @@ private:
     double docking_standoff_m_ = 0.30;
     double docking_extension_max_m_ = 0.90;
     double docking_pitch_limit_rad_ = 60.0 * M_PI / 180.0;
-    double docking_pitch_hold_cap_rad_ = 50.0 * M_PI / 180.0;
+    double docking_pitch_hold_cap_rad_ = 60.0 * M_PI / 180.0;
     double docking_command_velocity_ = 1.5;
     double docking_stage_extension_m_ = 0.05;
     double docking_stage_pitch_rad_ = 25.0 * M_PI / 180.0;
@@ -400,6 +462,10 @@ private:
     double docking_stage_min_pitch_rad_ = 18.0 * M_PI / 180.0;
     double docking_stage_extension_tolerance_m_ = 0.005;
     bool docking_stage_active_ = false;
+    double docking_acquire_extension_m_ = 0.04;
+    double docking_acquire_vertical_tolerance_m_ = 0.03;
+    bool docking_acquire_active_ = false;
+    bool docking_pitch_locked_ = false;
     double docking_camera_filter_alpha_ = 0.2;
     double docking_pose_timeout_sec_ = 0.5;
     double docking_lateral_tolerance_m_ = 0.05;
@@ -423,8 +489,38 @@ private:
     double docking_visual_slowdown_start_m_ = 0.30;
     double docking_visual_near_goal_scale_ = 0.25;
     double docking_visual_vertical_priority_error_m_ = 0.02;
+    double docking_visual_vertical_hold_error_m_ = 0.05;
     double docking_visual_pitch_limit_guard_rad_ = 15.0 * M_PI / 180.0;
+    bool docking_final_insertion_enabled_ = true;
+    double docking_final_insertion_trigger_distance_m_ = 0.20;
+    double docking_final_insertion_vertical_tolerance_m_ = 0.03;
+    double docking_final_insertion_extension_m_ = 0.30;
+    double docking_final_insertion_velocity_ = 1.5;
+    double docking_final_insertion_completion_tolerance_m_ = 0.01;
+    double docking_final_insertion_pitch_tolerance_rad_ = 2.0 * M_PI / 180.0;
+    double docking_final_insertion_pitch_bias_rad_ = 5.0 * M_PI / 180.0;
+    double docking_final_insertion_settle_sec_ = 1.0;
+    bool docking_final_insertion_settle_active_ = false;
+    rclcpp::Time docking_final_insertion_settle_deadline_{0, 0, RCL_ROS_TIME};
+    bool docking_final_insertion_active_ = false;
+    bool docking_final_insertion_complete_ = false;
+    bool docking_final_insertion_success_logged_ = false;
+    double docking_final_insertion_start_extension_m_ = 0.0;
+    double docking_final_insertion_goal_extension_m_ = 0.0;
+    double docking_final_insertion_hold_pitch_rad_ = 0.0;
+    double docking_pitch_hold_target_rad_ = 0.0;
     bool docking_stopped_on_tracking_loss_ = false;
+    bool docking_frozen_pose_extension_override_ = false;
+    double docking_last_camera_y_m_ = 0.0;
+    double docking_last_camera_z_m_ = 0.0;
+    bool docking_have_last_camera_pose_ = false;
+    int docking_stale_pose_count_ = 0;
+    uint64_t vision_pose_callback_count_ = 0;
+    int vision_repeated_pose_callback_count_ = 0;
+    bool have_last_vision_callback_pose_ = false;
+    double last_vision_callback_x_m_ = 0.0;
+    double last_vision_callback_y_m_ = 0.0;
+    double last_vision_callback_z_m_ = 0.0;
     double estimated_camera_x_base_ = 0.0;
     double estimated_camera_y_base_ = 0.0;
     double docking_goal_camera_y_m_ = 0.0;
@@ -622,12 +718,19 @@ private:
                 // desired_pitch_angle_ is frozen when the command is accepted.
                 double desired_pitch = desired_pitch_angle_;
                 double max_velocity = std::abs(desired_velocity_);
-                turret_->ActuateTurretCable(
-                    static_cast<float>(desired_length_),
-                    static_cast<float>(desired_pitch),
-                    static_cast<float>(max_velocity),
-                    hold_current_pitch_,
-                    current_state_ == TurretState::DOCKING);
+                if (current_state_ == TurretState::DOCKING &&
+                    docking_final_insertion_active_) {
+                    turret_->ActuateFinalInsertionFreePitch(
+                        static_cast<float>(desired_length_),
+                        static_cast<float>(max_velocity));
+                } else {
+                    turret_->ActuateTurretCable(
+                        static_cast<float>(desired_length_),
+                        static_cast<float>(desired_pitch),
+                        static_cast<float>(max_velocity),
+                        hold_current_pitch_,
+                        current_state_ == TurretState::DOCKING && !docking_final_insertion_active_);
+                }
 
     // RCLCPP_INFO(this->get_logger(),
     //     "EXECUTING zipper command: length=%.3f meters, max_velocity=%.3f",
@@ -828,8 +931,37 @@ private:
 
     void visionTagPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
     {
+        const double x = msg->pose.position.x;
+        const double y = msg->pose.position.y;
+        const double z = msg->pose.position.z;
+        const double pose_delta = have_last_vision_callback_pose_
+            ? std::sqrt(
+                std::pow(x - last_vision_callback_x_m_, 2.0) +
+                std::pow(y - last_vision_callback_y_m_, 2.0) +
+                std::pow(z - last_vision_callback_z_m_, 2.0))
+            : 1.0;
+        if (have_last_vision_callback_pose_ && pose_delta < 1e-4) {
+            ++vision_repeated_pose_callback_count_;
+        } else {
+            vision_repeated_pose_callback_count_ = 0;
+            if (pose_delta > 0.003) {
+                docking_frozen_pose_extension_override_ = false;
+            }
+        }
+        have_last_vision_callback_pose_ = true;
+        last_vision_callback_x_m_ = x;
+        last_vision_callback_y_m_ = y;
+        last_vision_callback_z_m_ = z;
+        ++vision_pose_callback_count_;
         latest_tag_pose_camera_ = *msg;
         latest_tag_pose_time_ = this->now();
+        if (docking_enabled_ && !docking_final_insertion_active_ &&
+            !docking_final_insertion_complete_ && vision_repeated_pose_callback_count_ >= 3) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "Vision tag pose callback unchanged for %d consecutive frames: cam_xyz=(%.3f, %.3f, %.3f) m.",
+                vision_repeated_pose_callback_count_ + 1,
+                x, y, z);
+        }
     }
 
     void visionTagVisibleCallback(const std_msgs::msg::Bool::SharedPtr msg)
@@ -846,37 +978,225 @@ private:
         if (docking_stage_active_) {
             const bool stage_extension_reached =
                 current_extension_ >= (docking_stage_extension_m_ - docking_stage_extension_tolerance_m_);
-            const bool stage_pitch_reached =
-                current_pitch_angle_ >= (docking_stage_pitch_rad_ - docking_stage_pitch_tolerance_rad_);
-            const bool stage_pitch_visible_ready =
-                vision_tag_visible_ && current_pitch_angle_ >= docking_stage_min_pitch_rad_;
-            if (!stage_extension_reached || (!stage_pitch_reached && !stage_pitch_visible_ready)) {
-                desired_length_ = std::max(current_extension_, docking_stage_extension_m_);
-                desired_pitch_angle_ = docking_stage_pitch_rad_;
+            if (!stage_extension_reached) {
+                desired_length_ = docking_stage_extension_m_;
+                desired_pitch_angle_ = docking_pitch_hold_target_rad_;
                 desired_velocity_ = std::max(docking_command_velocity_, 1.5);
                 hold_current_pitch_ = false;
                 RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                    "Docking stage move: cmd_ext=%.3f m cmd_pitch=%.2f deg current_ext=%.3f m current_pitch=%.2f deg",
+                    "Docking stage initial extend: cmd_ext=%.3f m hold_pitch=%.2f deg current_ext=%.3f m current_pitch=%.2f deg",
                     desired_length_, desired_pitch_angle_ * 180.0 / M_PI,
                     current_extension_, current_pitch_angle_ * 180.0 / M_PI);
                 return;
             }
 
             docking_stage_active_ = false;
+            docking_acquire_active_ = true;
             have_camera_estimate_ = false;
             docking_stopped_on_tracking_loss_ = false;
-            const double stage_camera_y =
-                (docking_lock_goal_camera_y_on_stage_complete_ && vision_tag_visible_)
-                    ? latest_tag_pose_camera_.pose.position.y
-                    : 0.0;
-            docking_goal_camera_y_m_ = stage_camera_y + docking_goal_camera_y_offset_m_;
+            docking_frozen_pose_extension_override_ = false;
+            docking_have_last_camera_pose_ = false;
+            docking_stale_pose_count_ = 0;
+            vision_repeated_pose_callback_count_ = 0;
             docking_last_servo_update_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
             RCLCPP_INFO(this->get_logger(),
-                "Docking stage complete at ext=%.3f m pitch=%.2f deg (tag_visible=%s, stage_cam_y=%.3f m, goal_cam_y=%.3f m) - switching to vision-guided docking",
+                "Docking stage initial extend complete at ext=%.3f m pitch=%.2f deg. Starting camera acquire phase.",
+                current_extension_, current_pitch_angle_ * 180.0 / M_PI);
+        }
+
+        if (docking_acquire_active_) {
+            const double pose_age = (this->now() - latest_tag_pose_time_).seconds();
+            const bool have_fresh_pose =
+                vision_tag_visible_ &&
+                latest_tag_pose_time_.nanoseconds() != 0 &&
+                pose_age <= docking_pose_timeout_sec_;
+            const double acquire_extension_goal = std::clamp(
+                docking_stage_extension_m_ + docking_acquire_extension_m_,
+                0.0,
+                docking_extension_max_m_);
+            const double acquire_pitch_cap = std::min(
+                docking_pitch_hold_cap_rad_,
+                docking_pitch_limit_rad_ - docking_visual_pitch_limit_guard_rad_);
+            const bool acquire_extension_ready =
+                current_extension_ >= (acquire_extension_goal - docking_stage_extension_tolerance_m_);
+
+            desired_length_ = acquire_extension_goal;
+            desired_velocity_ = std::max(docking_command_velocity_, 1.5);
+            hold_current_pitch_ = false;
+
+            if (!have_fresh_pose) {
+                desired_pitch_angle_ = std::min(docking_stage_pitch_rad_, docking_pitch_hold_cap_rad_);
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "Docking acquire search: cmd_ext=%.3f m cmd_pitch=%.2f deg current_ext=%.3f m current_pitch=%.2f deg",
+                    desired_length_, desired_pitch_angle_ * 180.0 / M_PI,
+                    current_extension_, current_pitch_angle_ * 180.0 / M_PI);
+                return;
+            }
+
+            const double y_cam = docking_camera_vertical_sign_ * latest_tag_pose_camera_.pose.position.y;
+            const double z_cam = docking_camera_forward_sign_ * latest_tag_pose_camera_.pose.position.z;
+            if (!have_camera_estimate_) {
+                docking_goal_camera_y_m_ = docking_goal_camera_y_offset_m_;
+                have_camera_estimate_ = true;
+                RCLCPP_INFO(this->get_logger(),
+                    "Docking acquire target camera y set to %.3f m (current y=%.3f m z=%.3f m).",
+                    docking_goal_camera_y_m_,
+                    y_cam,
+                    z_cam);
+            }
+            const double y_error = docking_goal_camera_y_m_ - y_cam;
+            const bool acquire_pitch_ready = current_pitch_angle_ >= docking_stage_min_pitch_rad_;
+            const bool acquire_alignment_ready =
+                std::fabs(y_error) <= docking_acquire_vertical_tolerance_m_;
+            const bool acquire_pose_frozen =
+                vision_repeated_pose_callback_count_ >= 30;
+            const bool near_acquire_pitch_cap =
+                current_pitch_angle_ >= (acquire_pitch_cap - 5.0 * M_PI / 180.0);
+
+            if (acquire_pitch_ready && acquire_alignment_ready) {
+                docking_acquire_active_ = false;
+                docking_pitch_hold_target_rad_ = current_pitch_angle_;
+                docking_pitch_locked_ = false;
+                docking_frozen_pose_extension_override_ = false;
+                docking_have_last_camera_pose_ = false;
+                docking_stale_pose_count_ = 0;
+                vision_repeated_pose_callback_count_ = 0;
+                docking_last_servo_update_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
+                desired_length_ = current_extension_;
+                desired_pitch_angle_ = current_pitch_angle_;
+                desired_velocity_ = 0.0;
+                RCLCPP_INFO(this->get_logger(),
+                    "Docking acquire complete at pitch %.2f deg ext=%.3f m (y_err=%.3f m z=%.3f m). Switching to vision-guided approach.",
+                    current_pitch_angle_ * 180.0 / M_PI,
+                    current_extension_,
+                    y_error,
+                    z_cam);
+                return;
+            }
+
+            if (acquire_pose_frozen && acquire_extension_ready && near_acquire_pitch_cap) {
+                docking_acquire_active_ = false;
+                docking_pitch_hold_target_rad_ = current_pitch_angle_;
+                docking_pitch_locked_ = false;
+                docking_frozen_pose_extension_override_ = false;
+                docking_have_last_camera_pose_ = false;
+                docking_stale_pose_count_ = 0;
+                vision_repeated_pose_callback_count_ = 0;
+                docking_last_servo_update_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
+                desired_length_ = current_extension_;
+                desired_pitch_angle_ = current_pitch_angle_;
+                desired_velocity_ = 0.0;
+                RCLCPP_WARN(this->get_logger(),
+                    "Docking acquire pose is frozen near the acquire pitch cap (pitch=%.2f deg, y_err=%.3f m, z=%.3f m, repeated_callbacks=%d). Switching to vision-guided approach to avoid over-pitching.",
+                    current_pitch_angle_ * 180.0 / M_PI,
+                    y_error,
+                    z_cam,
+                    vision_repeated_pose_callback_count_ + 1);
+                return;
+            }
+
+            double pitch_rate_cmd = 0.0;
+            if (std::fabs(y_error) > docking_visual_vertical_deadband_m_) {
+                pitch_rate_cmd = docking_visual_pitch_kp_ * y_error;
+            }
+            pitch_rate_cmd = std::clamp(
+                pitch_rate_cmd,
+                -docking_visual_max_pitch_rate_radps_,
+                docking_visual_max_pitch_rate_radps_);
+            const double pitch_step = std::clamp(
+                pitch_rate_cmd * std::clamp(docking_visual_pitch_command_horizon_sec_, 0.05, 0.5),
+                -docking_visual_pitch_step_max_rad_,
+                docking_visual_pitch_step_max_rad_);
+            desired_pitch_angle_ = std::clamp(
+                current_pitch_angle_ + pitch_step,
+                -docking_pitch_limit_rad_,
+                acquire_pitch_cap);
+            if (!acquire_pitch_ready) {
+                desired_pitch_angle_ = std::max(
+                    desired_pitch_angle_,
+                    std::min(docking_stage_pitch_rad_, acquire_pitch_cap));
+            }
+
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "Docking acquire: cmd_ext=%.3f m cmd_pitch=%.2f deg current_ext=%.3f m current_pitch=%.2f deg tag_z=%.3f m y_err=%.3f m",
+                desired_length_, desired_pitch_angle_ * 180.0 / M_PI,
                 current_extension_, current_pitch_angle_ * 180.0 / M_PI,
-                vision_tag_visible_ ? "true" : "false",
-                stage_camera_y,
-                docking_goal_camera_y_m_);
+                z_cam, y_error);
+            return;
+        }
+
+        if (docking_final_insertion_complete_) {
+            desired_length_ = docking_final_insertion_goal_extension_m_;
+            desired_pitch_angle_ = docking_final_insertion_hold_pitch_rad_;
+            desired_velocity_ = 0.0;
+            hold_current_pitch_ = false;
+            if (!docking_final_insertion_success_logged_) {
+                docking_final_insertion_success_logged_ = true;
+                RCLCPP_INFO(this->get_logger(),
+                    "Docking final insertion COMPLETE: ext=%.3f m pitch=%.2f deg. Holding final pose.",
+                    docking_final_insertion_goal_extension_m_,
+                    docking_final_insertion_hold_pitch_rad_ * 180.0 / M_PI);
+            }
+            return;
+        }
+
+        if (docking_final_insertion_settle_active_) {
+            const double pitch_hold_error =
+                std::fabs(current_pitch_angle_ - docking_final_insertion_hold_pitch_rad_);
+            desired_length_ = current_extension_;
+            desired_pitch_angle_ = docking_final_insertion_hold_pitch_rad_;
+            desired_velocity_ = 0.0;
+            hold_current_pitch_ = false;
+
+            const bool settle_time_elapsed = this->now() >= docking_final_insertion_settle_deadline_;
+            if (!settle_time_elapsed || pitch_hold_error > docking_final_insertion_pitch_tolerance_rad_) {
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                    "Docking final insertion settling: ext=%.3f m hold_pitch=%.2f deg pitch_err=%.2f deg time_left=%.2f s",
+                    current_extension_,
+                    docking_final_insertion_hold_pitch_rad_ * 180.0 / M_PI,
+                    pitch_hold_error * 180.0 / M_PI,
+                    std::max(0.0, (docking_final_insertion_settle_deadline_ - this->now()).seconds()));
+                return;
+            }
+
+            docking_final_insertion_settle_active_ = false;
+            docking_final_insertion_active_ = true;
+            desired_length_ = docking_final_insertion_goal_extension_m_;
+            desired_pitch_angle_ = docking_final_insertion_hold_pitch_rad_;
+            desired_velocity_ = docking_final_insertion_velocity_;
+            hold_current_pitch_ = false;
+            RCLCPP_WARN(this->get_logger(),
+                "Docking final insertion started after settle: extending from %.3f m to %.3f m at %.2f with free-pitch cable release around insertion pitch %.2f deg.",
+                docking_final_insertion_start_extension_m_,
+                docking_final_insertion_goal_extension_m_,
+                docking_final_insertion_velocity_,
+                docking_final_insertion_hold_pitch_rad_ * 180.0 / M_PI);
+            return;
+        }
+
+        if (docking_final_insertion_active_) {
+            desired_length_ = docking_final_insertion_goal_extension_m_;
+            desired_pitch_angle_ = docking_final_insertion_hold_pitch_rad_;
+            desired_velocity_ = docking_final_insertion_velocity_;
+            hold_current_pitch_ = false;
+
+            if (current_extension_ >=
+                (docking_final_insertion_goal_extension_m_ - docking_final_insertion_completion_tolerance_m_)) {
+                docking_final_insertion_active_ = false;
+                docking_final_insertion_complete_ = true;
+                docking_final_insertion_success_logged_ = false;
+                desired_length_ = current_extension_;
+                desired_pitch_angle_ = docking_final_insertion_hold_pitch_rad_;
+                desired_velocity_ = 0.0;
+                hold_current_pitch_ = false;
+            } else {
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "Docking final insertion: ext=%.3f/%.3f m fixed pitch-motor command active, sz_vel=%.2f",
+                    current_extension_,
+                    docking_final_insertion_goal_extension_m_,
+                    docking_final_insertion_velocity_);
+            }
+            return;
         }
 
         const double pose_age = (this->now() - latest_tag_pose_time_).seconds();
@@ -942,10 +1262,71 @@ private:
         docking_last_servo_update_ = servo_now;
         servo_dt = std::clamp(servo_dt, docking_visual_command_period_sec_, docking_visual_command_period_sec_ * 2.0);
 
-        const double z_cam = latest_tag_pose_camera_.pose.position.z;
-        const double y_cam = latest_tag_pose_camera_.pose.position.y;
+        const double z_cam = docking_camera_forward_sign_ * latest_tag_pose_camera_.pose.position.z;
+        const double y_cam = docking_camera_vertical_sign_ * latest_tag_pose_camera_.pose.position.y;
         const double z_error = z_cam - docking_standoff_m_;
         const double y_error = docking_goal_camera_y_m_ - y_cam;
+        const double camera_pose_delta = docking_have_last_camera_pose_
+            ? std::hypot(y_cam - docking_last_camera_y_m_, z_cam - docking_last_camera_z_m_)
+            : 1.0;
+        docking_last_camera_y_m_ = y_cam;
+        docking_last_camera_z_m_ = z_cam;
+        docking_have_last_camera_pose_ = true;
+
+        const bool final_insertion_ready =
+            docking_final_insertion_enabled_ &&
+            !docking_final_insertion_complete_ &&
+            z_cam <= docking_final_insertion_trigger_distance_m_ &&
+            std::fabs(y_error) <= docking_final_insertion_vertical_tolerance_m_;
+        if (final_insertion_ready) {
+            RCLCPP_INFO(this->get_logger(),
+                "Docking vision goal reached: cam_yz=(%.3f, %.3f) m target_yz=(%.3f, %.3f) m err_yz=(%.3f, %.3f) m. Entering final insertion settle.",
+                y_cam, z_cam,
+                docking_goal_camera_y_m_, docking_standoff_m_,
+                y_error, z_error);
+            docking_final_insertion_settle_active_ = true;
+            docking_final_insertion_active_ = false;
+            docking_final_insertion_start_extension_m_ = current_extension_;
+            docking_final_insertion_hold_pitch_rad_ = std::clamp(
+                current_pitch_angle_ + docking_final_insertion_pitch_bias_rad_,
+                -docking_pitch_limit_rad_,
+                docking_pitch_hold_cap_rad_);
+            docking_final_insertion_settle_deadline_ =
+                this->now() + rclcpp::Duration::from_seconds(docking_final_insertion_settle_sec_);
+            docking_final_insertion_goal_extension_m_ = std::clamp(
+                current_extension_ + docking_final_insertion_extension_m_,
+                0.0,
+                docking_extension_max_m_);
+            if (docking_final_insertion_settle_sec_ <= 0.0) {
+                docking_final_insertion_settle_active_ = false;
+                docking_final_insertion_active_ = true;
+                desired_length_ = docking_final_insertion_goal_extension_m_;
+                desired_pitch_angle_ = docking_final_insertion_hold_pitch_rad_;
+                desired_velocity_ = docking_final_insertion_velocity_;
+                hold_current_pitch_ = false;
+                RCLCPP_WARN(this->get_logger(),
+                    "Docking final insertion started immediately: extending from %.3f m to %.3f m at %.2f with pitch motor velocity command active immediately.",
+                    docking_final_insertion_start_extension_m_,
+                    docking_final_insertion_goal_extension_m_,
+                    docking_final_insertion_velocity_);
+            } else {
+                desired_length_ = current_extension_;
+                desired_pitch_angle_ = docking_final_insertion_hold_pitch_rad_;
+                desired_velocity_ = 0.0;
+                hold_current_pitch_ = false;
+                RCLCPP_WARN(this->get_logger(),
+                    "Docking final insertion settle started: z_cam=%.3f m y_err=%.3f m, holding ext=%.3f m for %.2f s with settle pitch target %.2f deg (current %.2f deg, bias %.2f deg) before extending to %.3f m.",
+                    z_cam,
+                    y_error,
+                    current_extension_,
+                    docking_final_insertion_settle_sec_,
+                    docking_final_insertion_hold_pitch_rad_ * 180.0 / M_PI,
+                    current_pitch_angle_ * 180.0 / M_PI,
+                    docking_final_insertion_pitch_bias_rad_ * 180.0 / M_PI,
+                    docking_final_insertion_goal_extension_m_);
+            }
+            return;
+        }
 
         double extension_rate_cmd = 0.0;
         if (std::fabs(z_error) > docking_visual_distance_deadband_m_) {
@@ -965,12 +1346,13 @@ private:
             -docking_visual_max_pitch_rate_radps_,
             docking_visual_max_pitch_rate_radps_);
 
-        const bool prioritize_extension_over_pitch =
-            z_error > 0.05 && std::fabs(y_error) <= docking_visual_vertical_priority_error_m_;
-        if (prioritize_extension_over_pitch) {
-            pitch_rate_cmd = 0.0;
+        if (std::fabs(y_error) <= docking_visual_vertical_priority_error_m_) {
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "Docking: vertical error %.3f m is small while depth error %.3f m remains; holding pitch and prioritizing extension.",
+                "Docking: vertical error %.3f m is small while depth error %.3f m remains; continuing depth-first approach.",
+                y_error, z_error);
+        } else {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Docking: vertical error %.3f m remains while depth error %.3f m remains; continuing simultaneous pitch/depth correction.",
                 y_error, z_error);
         }
 
@@ -987,18 +1369,30 @@ private:
         }
 
         double extension_scale = near_goal_scale;
-        if (z_cam < docking_visual_slowdown_start_m_ &&
-            std::fabs(y_error) > docking_visual_vertical_priority_error_m_) {
-            extension_scale *= std::clamp(
-                docking_visual_vertical_priority_error_m_ / std::fabs(y_error),
-                0.0,
-                1.0);
+        const double abs_y_error = std::fabs(y_error);
+        double vertical_alignment_scale = 1.0;
+        if (abs_y_error > docking_visual_vertical_priority_error_m_) {
+            if (docking_visual_vertical_hold_error_m_ > docking_visual_vertical_priority_error_m_) {
+                vertical_alignment_scale = std::clamp(
+                    (docking_visual_vertical_hold_error_m_ - abs_y_error) /
+                    std::max(1e-6,
+                        docking_visual_vertical_hold_error_m_ - docking_visual_vertical_priority_error_m_),
+                    0.0,
+                    1.0);
+            } else {
+                vertical_alignment_scale = 0.0;
+            }
+            if (vertical_alignment_scale < 1.0) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "Docking: reducing extension to recover vertical alignment (y_err=%.3f m, ext_scale=%.2f, priority=%.3f m, hold=%.3f m).",
+                    y_error,
+                    vertical_alignment_scale,
+                    docking_visual_vertical_priority_error_m_,
+                    docking_visual_vertical_hold_error_m_);
+            }
         }
+        extension_scale *= vertical_alignment_scale;
 
-        const bool near_positive_pitch_limit =
-            current_pitch_angle_ >= (docking_pitch_limit_rad_ - docking_visual_pitch_limit_guard_rad_);
-        const bool near_negative_pitch_limit =
-            current_pitch_angle_ <= (-docking_pitch_limit_rad_ + docking_visual_pitch_limit_guard_rad_);
         double pitch_limit_scale = 1.0;
         if (pitch_rate_cmd > 0.0) {
             const double remaining_margin = docking_pitch_limit_rad_ - current_pitch_angle_;
@@ -1020,22 +1414,15 @@ private:
                 "Docking: holding pitch at configured cap %.1f deg while continuing extension.",
                 docking_pitch_hold_cap_rad_ * 180.0 / M_PI);
         }
-        if ((near_positive_pitch_limit && pitch_rate_cmd > 0.0) ||
-            (near_negative_pitch_limit && pitch_rate_cmd < 0.0)) {
-            if (std::fabs(y_error) > docking_visual_vertical_priority_error_m_) {
-                extension_scale = 0.0;
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                    "Docking: pitch is near its limit with unresolved vertical error; pausing extension to preserve tag visibility.");
-            } else {
-                pitch_rate_cmd = 0.0;
-                pitch_limit_scale = 0.0;
-                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                    "Docking: pitch is near its limit but vertical error is small; holding pitch and continuing extension.");
-            }
+        if (pitch_limit_scale < 1.0) {
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Docking: tapering pitch command near limit (pitch=%.2f deg, remaining_margin=%.2f deg, scale=%.2f).",
+                current_pitch_angle_ * 180.0 / M_PI,
+                (docking_pitch_limit_rad_ - std::fabs(current_pitch_angle_)) * 180.0 / M_PI,
+                pitch_limit_scale);
         }
 
         extension_rate_cmd *= extension_scale;
-        pitch_rate_cmd *= (0.6 + 0.4 * near_goal_scale);
         pitch_rate_cmd *= pitch_limit_scale;
 
         double extension_step_limit = docking_visual_extension_step_max_m_;
@@ -1049,9 +1436,6 @@ private:
         extension_step_limit = std::min(extension_step_limit, std::max(docking_visual_distance_deadband_m_, std::fabs(z_error)));
 
         double pitch_step_limit = docking_visual_pitch_step_max_rad_;
-        if (z_cam < docking_visual_slowdown_start_m_) {
-            pitch_step_limit *= (0.5 + 0.5 * near_goal_scale);
-        }
         pitch_step_limit *= std::max(0.25, pitch_limit_scale);
         pitch_step_limit = std::clamp(
             pitch_step_limit,
@@ -1071,6 +1455,43 @@ private:
             -pitch_step_limit,
             pitch_step_limit);
 
+        const double frozen_pose_delta_threshold = std::clamp(
+            0.00075 + 0.00225 * near_goal_scale,
+            0.00075,
+            0.003);
+        const double extension_motion_watchdog_threshold = std::max(
+            frozen_pose_delta_threshold,
+            0.002);
+        const double pitch_motion_watchdog_threshold =
+            ((z_cam <= docking_final_insertion_trigger_distance_m_ + 0.05)
+                ? 3.0
+                : 1.0) * M_PI / 180.0;
+        const bool extension_motion_significant =
+            std::fabs(extension_step) > extension_motion_watchdog_threshold;
+        const bool pitch_motion_significant =
+            std::fabs(extension_step) <= extension_motion_watchdog_threshold &&
+            std::fabs(pitch_step) > pitch_motion_watchdog_threshold;
+        const bool commanded_motion_significant =
+            extension_motion_significant || pitch_motion_significant;
+        if (camera_pose_delta < frozen_pose_delta_threshold && commanded_motion_significant) {
+            ++docking_stale_pose_count_;
+        } else {
+            docking_stale_pose_count_ = 0;
+        }
+        if (docking_stale_pose_count_ >= 3) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Docking vision pose appears frozen while motion is commanded (delta=%.4f m threshold=%.4f m, repeated_callbacks=%d, visible=%s, pose_age=%.3f s, cam_xyz=(%.3f, %.3f, %.3f) m, target_yz=(%.3f, %.3f) m, cmd_step=[ext=%.3f m pitch=%.2f deg]). Continuing approach.",
+                camera_pose_delta,
+                frozen_pose_delta_threshold,
+                vision_repeated_pose_callback_count_ + 1,
+                vision_tag_visible_ ? "true" : "false",
+                pose_age,
+                lateral_error, y_cam, z_cam,
+                docking_goal_camera_y_m_, docking_standoff_m_,
+                extension_step,
+                pitch_step * 180.0 / M_PI);
+        }
+
         desired_length_ = std::clamp(
             current_extension_ + extension_step,
             0.0,
@@ -1080,6 +1501,7 @@ private:
             -docking_pitch_limit_rad_,
             docking_pitch_limit_rad_);
         desired_pitch_angle_ = std::min(desired_pitch_angle_, docking_pitch_hold_cap_rad_);
+        docking_pitch_hold_target_rad_ = desired_pitch_angle_;
         desired_velocity_ = std::max(docking_command_velocity_, 1.5);
         hold_current_pitch_ = false;
 
@@ -1129,16 +1551,22 @@ private:
     void stopMotor()
     {
         if (turret_) {
-            turret_->StopSpiralZipper();
-            RCLCPP_INFO(this->get_logger(), "Motor stopped");
+            turret_->RequestZeroAbort();
+            turret_->StopAllMotors();
+            RCLCPP_INFO(this->get_logger(), "All turret motors stopped");
         }
     }
     
     void ensureMotorStopped()
     {
-        // Only stop if motor is actually moving to avoid spam
-        if (turret_ && std::abs(current_velocity_) > 0.01) {
-            turret_->StopSpiralZipper();
+        if (!turret_) {
+            return;
+        }
+        const bool zipper_moving = std::abs(current_velocity_) > 0.01;
+        const bool pitch_moving = std::abs(turret_->GetPitchMotorVelocity()) > 0.01;
+        const bool yaw_moving = std::abs(turret_->GetYawMotorVelocity()) > 0.01;
+        if (zipper_moving || pitch_moving || yaw_moving) {
+            turret_->StopAllMotors();
         }
     }
     
@@ -1274,6 +1702,8 @@ private:
         
         try {
             RCLCPP_INFO(this->get_logger(), "Starting turret zero sequence...");
+            turret_->ClearZeroAbort();
+            turret_->StopAllMotors();
             
             // Start zeroing in a separate thread to avoid blocking the executor
             is_zeroing_ = true;
@@ -1324,6 +1754,13 @@ private:
                 stopMotor();
                 docking_enabled_ = false;
                 docking_stage_active_ = false;
+                docking_acquire_active_ = false;
+                docking_pitch_locked_ = false;
+                docking_final_insertion_settle_active_ = false;
+                docking_final_insertion_active_ = false;
+                docking_final_insertion_complete_ = false;
+                docking_final_insertion_success_logged_ = false;
+                docking_final_insertion_hold_pitch_rad_ = 0.0;
                 current_state_ = TurretState::IDLE;
                 response->success = true;
                 response->message = "State changed to IDLE";
@@ -1338,6 +1775,13 @@ private:
                     stopMotor();
                     docking_enabled_ = false;
                     docking_stage_active_ = false;
+                    docking_acquire_active_ = false;
+                    docking_pitch_locked_ = false;
+                    docking_final_insertion_settle_active_ = false;
+                    docking_final_insertion_active_ = false;
+                    docking_final_insertion_complete_ = false;
+                    docking_final_insertion_success_logged_ = false;
+                    docking_final_insertion_hold_pitch_rad_ = 0.0;
                     current_state_ = TurretState::READY;
                     response->success = true;
                     response->message = "State changed to READY";
@@ -1351,6 +1795,12 @@ private:
                 } else {
                     docking_enabled_ = false;
                     docking_stage_active_ = false;
+                    docking_acquire_active_ = false;
+                    docking_pitch_locked_ = false;
+                    docking_final_insertion_settle_active_ = false;
+                    docking_final_insertion_active_ = false;
+                    docking_final_insertion_complete_ = false;
+                    docking_final_insertion_success_logged_ = false;
                     current_state_ = TurretState::RUNNING;
                     response->success = true;
                     response->message = "State changed to RUNNING";
@@ -1377,6 +1827,9 @@ private:
                     docking_stage_pitch_tolerance_rad_ = this->get_parameter("docking_stage_pitch_tolerance_deg").as_double() * M_PI / 180.0;
                     docking_stage_min_pitch_rad_ = this->get_parameter("docking_stage_min_pitch_deg").as_double() * M_PI / 180.0;
                     docking_stage_extension_tolerance_m_ = this->get_parameter("docking_stage_extension_tolerance_m").as_double();
+                    docking_acquire_extension_m_ = this->get_parameter("docking_acquire_extension_m").as_double();
+                    docking_acquire_vertical_tolerance_m_ =
+                        this->get_parameter("docking_acquire_vertical_tolerance_m").as_double();
                     docking_camera_filter_alpha_ = this->get_parameter("docking_camera_filter_alpha").as_double();
                     docking_pose_timeout_sec_ = this->get_parameter("docking_pose_timeout_sec").as_double();
                     docking_lateral_tolerance_m_ = this->get_parameter("docking_lateral_tolerance_m").as_double();
@@ -1415,11 +1868,46 @@ private:
                         this->get_parameter("docking_visual_near_goal_scale").as_double();
                     docking_visual_vertical_priority_error_m_ =
                         this->get_parameter("docking_visual_vertical_priority_error_m").as_double();
+                    docking_visual_vertical_hold_error_m_ =
+                        this->get_parameter("docking_visual_vertical_hold_error_m").as_double();
                     docking_visual_pitch_limit_guard_rad_ =
                         this->get_parameter("docking_visual_pitch_limit_guard_deg").as_double() * M_PI / 180.0;
+                    docking_final_insertion_enabled_ =
+                        this->get_parameter("docking_final_insertion_enabled").as_bool();
+                    docking_final_insertion_trigger_distance_m_ =
+                        this->get_parameter("docking_final_insertion_trigger_distance_m").as_double();
+                    docking_final_insertion_vertical_tolerance_m_ =
+                        this->get_parameter("docking_final_insertion_vertical_tolerance_m").as_double();
+                    docking_final_insertion_extension_m_ =
+                        this->get_parameter("docking_final_insertion_extension_m").as_double();
+                    docking_final_insertion_velocity_ =
+                        this->get_parameter("docking_final_insertion_velocity").as_double();
+                    docking_final_insertion_completion_tolerance_m_ =
+                        this->get_parameter("docking_final_insertion_completion_tolerance_m").as_double();
+                    docking_final_insertion_pitch_tolerance_rad_ =
+                        this->get_parameter("docking_final_insertion_pitch_tolerance_deg").as_double() * M_PI / 180.0;
+                    docking_final_insertion_pitch_bias_rad_ =
+                        this->get_parameter("docking_final_insertion_pitch_bias_deg").as_double() * M_PI / 180.0;
+                    docking_final_insertion_settle_sec_ =
+                        this->get_parameter("docking_final_insertion_settle_sec").as_double();
                     docking_enabled_ = true;
                     docking_stage_active_ = true;
+                    docking_acquire_active_ = false;
+                    docking_pitch_locked_ = false;
+                    docking_final_insertion_settle_active_ = false;
+                    docking_final_insertion_active_ = false;
+                    docking_final_insertion_complete_ = false;
+                    docking_final_insertion_success_logged_ = false;
+                    docking_final_insertion_start_extension_m_ = 0.0;
+                    docking_final_insertion_goal_extension_m_ = 0.0;
+                    docking_final_insertion_hold_pitch_rad_ = 0.0;
+                    docking_final_insertion_settle_deadline_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
+                    docking_pitch_hold_target_rad_ = current_pitch_angle_;
                     docking_stopped_on_tracking_loss_ = false;
+                    docking_last_camera_y_m_ = 0.0;
+                    docking_last_camera_z_m_ = 0.0;
+                    docking_have_last_camera_pose_ = false;
+                    docking_stale_pose_count_ = 0;
                     have_camera_estimate_ = false;
                     docking_goal_camera_y_m_ = 0.0;
                     docking_last_servo_update_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
@@ -1427,12 +1915,23 @@ private:
                     response->success = true;
                     response->message = "State changed to DOCKING";
                     RCLCPP_INFO(this->get_logger(),
-                        "Docking armed: standoff=%.3f m, extension_max=%.3f m, pitch_limit=%.1f deg, pitch_hold_cap=%.1f deg, stage=[ext=%.3f m pitch=%.1f deg min_pitch=%.1f deg], lateral_hold=%s lock_goal_cam_y=%s offset_y=%.3f m stop_on_loss=%s loss_stop_dist=%.2f m, visual_gains=[ext=%.2f pitch=%.2f max_ext=%.2f m/s max_pitch=%.1f deg/s period=%.2f s pitch_horizon=%.2f s step_ext=%.3f m step_pitch=%.1f deg slowdown_start=%.2f m near_scale=%.2f priority_err=%.3f m], camera_signs=[forward=%.1f vertical=%.1f]",
+                        "Docking armed: standoff=%.3f m, extension_max=%.3f m, pitch_limit=%.1f deg, pitch_hold_cap=%.1f deg, stage=[ext=%.3f m pitch=%.1f deg min_pitch=%.1f deg], acquire=[extra_ext=%.3f m vertical_tol=%.3f m], final_insertion=[enabled=%s trigger_z=%.3f m vertical_tol=%.3f m ext=%.3f m vel=%.2f tol=%.3f m pitch_tol=%.1f deg pitch_bias=%.1f deg settle=%.2f s], lateral_hold=%s lock_goal_cam_y=%s offset_y=%.3f m stop_on_loss=%s loss_stop_dist=%.2f m, visual_gains=[ext=%.2f pitch=%.2f max_ext=%.2f m/s max_pitch=%.1f deg/s period=%.2f s pitch_horizon=%.2f s step_ext=%.3f m step_pitch=%.1f deg slowdown_start=%.2f m near_scale=%.2f priority_err=%.3f m hold_err=%.3f m], camera_signs=[forward=%.1f vertical=%.1f]",
                         docking_standoff_m_, docking_extension_max_m_,
                         docking_pitch_limit_rad_ * 180.0 / M_PI,
                         docking_pitch_hold_cap_rad_ * 180.0 / M_PI,
                         docking_stage_extension_m_, docking_stage_pitch_rad_ * 180.0 / M_PI,
                         docking_stage_min_pitch_rad_ * 180.0 / M_PI,
+                        docking_acquire_extension_m_,
+                        docking_acquire_vertical_tolerance_m_,
+                        docking_final_insertion_enabled_ ? "true" : "false",
+                        docking_final_insertion_trigger_distance_m_,
+                        docking_final_insertion_vertical_tolerance_m_,
+                        docking_final_insertion_extension_m_,
+                        docking_final_insertion_velocity_,
+                        docking_final_insertion_completion_tolerance_m_,
+                        docking_final_insertion_pitch_tolerance_rad_ * 180.0 / M_PI,
+                        docking_final_insertion_pitch_bias_rad_ * 180.0 / M_PI,
+                        docking_final_insertion_settle_sec_,
                         docking_hold_on_lateral_error_ ? "true" : "false",
                         docking_lock_goal_camera_y_on_stage_complete_ ? "true" : "false",
                         docking_goal_camera_y_offset_m_,
@@ -1449,6 +1948,7 @@ private:
                         docking_visual_slowdown_start_m_,
                         docking_visual_near_goal_scale_,
                         docking_visual_vertical_priority_error_m_,
+                        docking_visual_vertical_hold_error_m_,
                         docking_camera_forward_sign_, docking_camera_vertical_sign_);
                 }
                 break;
@@ -1467,6 +1967,11 @@ private:
                 teleop_yaw_velocity_ = 0.0;
                 docking_enabled_ = false;
                 docking_stage_active_ = false;
+                docking_acquire_active_ = false;
+                docking_pitch_locked_ = false;
+                docking_final_insertion_settle_active_ = false;
+                docking_final_insertion_success_logged_ = false;
+                docking_final_insertion_hold_pitch_rad_ = 0.0;
                 current_state_ = TurretState::TELEOP;
                 response->success = true;
                 response->message = "State changed to TELEOP (direct motor control)";
@@ -1490,6 +1995,10 @@ private:
                 is_zeroed_ = false;
                 docking_enabled_ = false;
                 docking_stage_active_ = false;
+                docking_acquire_active_ = false;
+                docking_pitch_locked_ = false;
+                docking_final_insertion_settle_active_ = false;
+                docking_final_insertion_success_logged_ = false;
                 current_state_ = TurretState::TELEOP_ZERO;
                 response->success = true;
                 response->message = "State changed to TELEOP_ZERO (zeroing mode)";
@@ -1562,9 +2071,14 @@ private:
 #include "load_cell_node.h"
 
 // Signal handler – just requests ROS shutdown; node destructors handle cleanup
+static std::weak_ptr<TurretROS2Node> g_turret_node;
+
 void signalHandler(int /*signum*/)
 {
     std::cout << "\nShutdown signal received – stopping..." << std::endl;
+    if (auto turret_node = g_turret_node.lock()) {
+        turret_node->emergencyStop();
+    }
     rclcpp::shutdown();
 }
 
@@ -1591,6 +2105,7 @@ int main(int argc, char* argv[])
         // affects GPIO initialisation, not runtime behaviour.
         auto load_cell_node = std::make_shared<LoadCellNode>();
         auto turret_node = std::make_shared<TurretROS2Node>();
+        g_turret_node = turret_node;
 
         RCLCPP_INFO(turret_node->get_logger(),
             "Both nodes created – starting MultiThreadedExecutor");

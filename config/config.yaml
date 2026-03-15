@@ -39,22 +39,24 @@ pitch_angle_offset_deg: 0.0
 turret_id: 1
 
 docking:
-  standoff_m: 0.10
+  standoff_m: 0.05
   extension_max_m: 0.90
   pitch_limit_deg: 60.0
-  pitch_hold_cap_deg: 50.0
+  pitch_hold_cap_deg: 60.0
   command_velocity: 1.5
   stage_extension_m: 0.05
   stage_pitch_deg: 25.0
-  stage_pitch_tolerance_deg: 3.0
+  stage_pitch_tolerance_deg: 1.0
   stage_min_pitch_deg: 18.0
   stage_extension_tolerance_m: 0.005
+  acquire_extension_m: 0.04
+  acquire_vertical_tolerance_m: 0.015
   camera_filter_alpha: 0.2
   pose_timeout_sec: 0.5
   lateral_tolerance_m: 0.05
   hold_on_lateral_error: false
   lock_goal_camera_y_on_stage_complete: true
-  goal_camera_y_offset_m: 0.0
+  goal_camera_y_offset_m: 0.03
   stop_on_close_tracking_loss: true
   tracking_loss_stop_distance_m: 0.14
   camera_forward_sign: 1.0
@@ -65,11 +67,22 @@ docking:
   visual_max_pitch_rate_deg_s: 80.0
   visual_distance_deadband_m: 0.01
   visual_vertical_deadband_m: 0.01
-  visual_command_period_sec: 2.0
+  visual_command_period_sec: 0.5
   visual_pitch_command_horizon_sec: 0.25
-  visual_extension_step_max_m: 0.12
+  visual_extension_step_max_m: 0.04
   visual_pitch_step_max_deg: 12.0
   visual_slowdown_start_m: 0.30
   visual_near_goal_scale: 0.15
-  visual_vertical_priority_error_m: 0.02
-  visual_pitch_limit_guard_deg: 15.0
+  visual_vertical_priority_error_m: 0.035
+  visual_vertical_hold_error_m: 0.07
+  visual_pitch_limit_guard_deg: 5.0
+  final_insertion_enabled: true
+  final_insertion_trigger_distance_m: 0.15
+  final_insertion_vertical_tolerance_m: 0.035
+  final_insertion_extension_m: 0.2
+  final_insertion_velocity: 1.5
+  final_insertion_completion_tolerance_m: 0.01
+  final_insertion_pitch_tolerance_deg: 2.0
+  final_insertion_pitch_bias_deg: 7.0
+  final_insertion_pitch_motor_velocity_rad_s: 0.4
+  final_insertion_settle_sec: 0.0

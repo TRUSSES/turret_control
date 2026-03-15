@@ -2,7 +2,7 @@ apriltag:
   ros__parameters:
     image_transport: raw
     family: 36h11
-    size: 0.08
+    size: 0.05
     profile: false
     max_hamming: 0
     detector:
@@ -16,4 +16,4 @@ apriltag:
     tag:
       ids: [0, 1]
       frames: [tag36h11_0, tag36h11_1]
-      sizes: [0.08, 0.08]
+      sizes: [0.05, 0.05]

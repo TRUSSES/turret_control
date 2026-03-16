@@ -21,6 +21,9 @@ class Turret {
   bool ActuateTurretCable(float goal_dist, float desired_pitch_rad, float max_zipper_velocity,
                          bool hold_pitch = false, bool prioritize_pitch = false);
   bool ActuateFinalInsertionFreePitch(float goal_dist, float max_zipper_velocity);
+  bool ActuateFixedVelocityPitchAndZipper(float goal_dist,
+                                          float max_zipper_velocity,
+                                          float pitch_motor_velocity_rad_s);
   void Update();
   
   // Spiral zipper control methods for ROS2 integration
@@ -51,6 +54,7 @@ class Turret {
   void SetSpiralZipperVelocity(double velocity);
   void SetPitchVelocity(double velocity);
   void SetYawVelocity(double velocity);
+  void HoldYawPosition(double desired_angle_rad, double kp = 8.0, double kd = 2.0);
   void StopAllMotors();
   void RequestZeroAbort();
   void ClearZeroAbort();
@@ -90,7 +94,7 @@ class Turret {
   double pitch_motor_cable_zero_length_m_;
 
   const double cable_kp_ = 1.2;
-  const double pitch_kp_ = 2.0;
+  const double pitch_kp_ = 2.4;
   const double pitch_motor_radius_m_ = 0.013;
   const double max_omega_rad_ = 2.0;
   const double max_zipper_rate_coupled_ = 2.0;

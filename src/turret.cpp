@@ -393,7 +393,7 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   desired_pitch_motor_velocity = std::clamp(desired_pitch_motor_velocity,
                                             -max_omega_rad_,
                                             max_omega_rad_);
-  pitch_motor_->sendCommandMITMode(0.0, desired_pitch_motor_velocity, 0.0, 1.5, 0.0);
+  pitch_motor_->sendCommandMITMode(0.0, desired_pitch_motor_velocity, 0.0, 1.8, 0.0);
 
   bool pitch_reached = final_pitch_reached;
   bool zipper_reached = final_zipper_reached;
@@ -472,6 +472,63 @@ bool Turret::ActuateFinalInsertionFreePitch(float goal_dist, float max_zipper_ve
               << (pitch_release_velocity * 180.0 / M_PI) << " deg/s" << std::endl;
   }
   return false;
+}
+
+bool Turret::ActuateFixedVelocityPitchAndZipper(float goal_dist,
+                                                float max_zipper_velocity,
+                                                float pitch_motor_velocity_rad_s) {
+  if (!pitch_motor_) {
+    std::cerr << "ActuateFixedVelocityPitchAndZipper aborted: pitch motor unavailable" << std::endl;
+    return false;
+  }
+
+  turret_encoder_.Update();
+  spiral_zipper_.UpdateEncoder();
+
+  const double current_pitch_angle = GetPitchAngle();
+  const double zipper_extension = spiral_zipper_.GetExtension();
+  const double goal_zipper_error = goal_dist - zipper_extension;
+
+  constexpr double kMinCommandVelocity = 0.03;
+  constexpr double kMaxCommandVelocity = 2.0;
+  constexpr double kPitchVelocityKd = 2.0;
+  double zipper_velocity = std::abs(max_zipper_velocity);
+  if (zipper_velocity <= 0.0) {
+    zipper_velocity = kMaxCommandVelocity;
+  } else {
+    zipper_velocity = std::clamp(zipper_velocity, kMinCommandVelocity, kMaxCommandVelocity);
+  }
+
+  spiral_zipper_.ActuateLength(goal_dist, zipper_velocity);
+
+  double pitch_motor_velocity = std::clamp(
+      static_cast<double>(pitch_motor_velocity_rad_s),
+      -max_omega_rad_,
+      max_omega_rad_);
+  const bool turret_limit_pressed = turret_limit_switch_.IsPressed();
+  if (turret_limit_pressed && pitch_motor_velocity < 0.0) {
+    pitch_motor_velocity = 0.0;
+  }
+
+  if (std::fabs(goal_zipper_error) < 0.001) {
+    pitch_motor_velocity = 0.0;
+  }
+
+  pitch_motor_->sendCommandMITMode(0.0, pitch_motor_velocity, 0.0, kPitchVelocityKd, 0.0);
+
+  static int active_log_counter = 0;
+  ++active_log_counter;
+  if (active_log_counter % 100 == 0) {
+    std::cout << "ActuateFixedVelocityPitchAndZipper: pitch="
+              << (current_pitch_angle * 180.0 / M_PI) << " deg, ext="
+              << zipper_extension << " m, goal_ext=" << goal_dist
+              << " m, pitch_motor_vel="
+              << pitch_motor_velocity
+              << " rad/s, pitch_cmd="
+              << (pitch_motor_velocity * 180.0 / M_PI) << " deg/s" << std::endl;
+  }
+
+  return std::fabs(goal_zipper_error) < 0.001;
 }
 
 void Turret::ZeroSpiralZipper() {
@@ -778,6 +835,19 @@ void Turret::SetYawVelocity(double velocity) {
   if (yaw_motor_) {
     yaw_motor_->sendCommandMITMode(0.0, velocity, 0.0, 0.3, 0.0);
   }
+}
+
+void Turret::HoldYawPosition(double desired_angle_rad, double kp, double kd) {
+  if (!yaw_motor_) {
+    return;
+  }
+
+  yaw_motor_->sendCommandMITMode(
+      static_cast<float>(desired_angle_rad),
+      0.0f,
+      static_cast<float>(kp),
+      static_cast<float>(kd),
+      0.0f);
 }
 
 void Turret::StopAllMotors() {

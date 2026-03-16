@@ -63,8 +63,8 @@ public:
         this->declare_parameter("zero_velocity", -0.2);
         this->declare_parameter("docking_standoff_m", 0.30);
         this->declare_parameter("docking_extension_max_m", 0.90);
-        this->declare_parameter("docking_pitch_limit_deg", 60.0);
-        this->declare_parameter("docking_pitch_hold_cap_deg", 60.0);
+        this->declare_parameter("docking_pitch_limit_deg", 65.0);
+        this->declare_parameter("docking_pitch_hold_cap_deg", 63.0);
         this->declare_parameter("docking_command_velocity", 1.5);
         this->declare_parameter("docking_stage_extension_m", 0.05);
         this->declare_parameter("docking_stage_pitch_deg", 25.0);
@@ -107,6 +107,11 @@ public:
         this->declare_parameter("docking_final_insertion_pitch_tolerance_deg", 2.0);
         this->declare_parameter("docking_final_insertion_pitch_bias_deg", 5.0);
         this->declare_parameter("docking_final_insertion_settle_sec", 1.0);
+        this->declare_parameter("undocking_pitch_only_duration_sec", 5.0);
+        this->declare_parameter("undocking_combined_retract_duration_sec", 3.0);
+        this->declare_parameter("undocking_target_extension_m", 0.2);
+        this->declare_parameter("undocking_target_pitch_deg", 40.0);
+        this->declare_parameter("undocking_retract_velocity", 1.5);
         
         // Load configuration - try different paths
         std::vector<std::string> config_paths = {
@@ -268,6 +273,24 @@ public:
                 this->set_parameter(rclcpp::Parameter("docking_final_insertion_settle_sec", docking["final_insertion_settle_sec"].as<double>()));
             }
         }
+        if (config_["undocking"]) {
+            const auto undocking = config_["undocking"];
+            if (undocking["pitch_only_duration_sec"]) {
+                this->set_parameter(rclcpp::Parameter("undocking_pitch_only_duration_sec", undocking["pitch_only_duration_sec"].as<double>()));
+            }
+            if (undocking["combined_retract_duration_sec"]) {
+                this->set_parameter(rclcpp::Parameter("undocking_combined_retract_duration_sec", undocking["combined_retract_duration_sec"].as<double>()));
+            }
+            if (undocking["target_extension_m"]) {
+                this->set_parameter(rclcpp::Parameter("undocking_target_extension_m", undocking["target_extension_m"].as<double>()));
+            }
+            if (undocking["target_pitch_deg"]) {
+                this->set_parameter(rclcpp::Parameter("undocking_target_pitch_deg", undocking["target_pitch_deg"].as<double>()));
+            }
+            if (undocking["retract_velocity"]) {
+                this->set_parameter(rclcpp::Parameter("undocking_retract_velocity", undocking["retract_velocity"].as<double>()));
+            }
+        }
 
         // Read turret_id from config
         turret_id_ = config_["turret_id"] ? config_["turret_id"].as<int>() : 1;
@@ -420,7 +443,8 @@ private:
         RUNNING = 2,
         TELEOP = 3,
         TELEOP_ZERO = 4,
-        DOCKING = 5
+        DOCKING = 5,
+        UNDOCKING = 6
     };
 
     // Core components
@@ -453,8 +477,8 @@ private:
     bool have_camera_estimate_ = false;
     double docking_standoff_m_ = 0.30;
     double docking_extension_max_m_ = 0.90;
-    double docking_pitch_limit_rad_ = 60.0 * M_PI / 180.0;
-    double docking_pitch_hold_cap_rad_ = 60.0 * M_PI / 180.0;
+    double docking_pitch_limit_rad_ = 65.0 * M_PI / 180.0;
+    double docking_pitch_hold_cap_rad_ = 63.0 * M_PI / 180.0;
     double docking_command_velocity_ = 1.5;
     double docking_stage_extension_m_ = 0.05;
     double docking_stage_pitch_rad_ = 25.0 * M_PI / 180.0;
@@ -509,6 +533,20 @@ private:
     double docking_final_insertion_goal_extension_m_ = 0.0;
     double docking_final_insertion_hold_pitch_rad_ = 0.0;
     double docking_pitch_hold_target_rad_ = 0.0;
+    double undocking_pitch_only_duration_sec_ = 5.0;
+    double undocking_combined_retract_duration_sec_ = 3.0;
+    double undocking_target_extension_m_ = 0.2;
+    double undocking_target_pitch_rad_ = 40.0 * M_PI / 180.0;
+    double undocking_retract_velocity_ = 1.5;
+    bool undocking_pitch_only_active_ = false;
+    bool undocking_combined_active_ = false;
+    bool undocking_target_reached_logged_ = false;
+    rclcpp::Time undocking_pitch_only_deadline_{0, 0, RCL_ROS_TIME};
+    rclcpp::Time undocking_combined_deadline_{0, 0, RCL_ROS_TIME};
+    double undocking_combined_pitch_velocity_radps_ = 0.0;
+    double yaw_hold_target_rad_ = 0.0;
+    double yaw_hold_kp_ = 8.0;
+    double yaw_hold_kd_ = 2.0;
     bool docking_stopped_on_tracking_loss_ = false;
     bool docking_frozen_pose_extension_override_ = false;
     double docking_last_camera_y_m_ = 0.0;
@@ -655,6 +693,15 @@ private:
                 }
                 break;
 
+            case TurretState::UNDOCKING:
+                if (is_zeroed_) {
+                    executeZipperCommand();
+                } else {
+                    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                        "In UNDOCKING state but not zeroed - cannot execute commands");
+                }
+                break;
+
             case TurretState::TELEOP:
                 // In TELEOP state, execute direct velocity commands (no zeroing required)
                 executeTeleopCommand();
@@ -714,6 +761,8 @@ private:
             if (turret_) {
                 if (current_state_ == TurretState::DOCKING) {
                     updateDockingSetpoint();
+                } else if (current_state_ == TurretState::UNDOCKING) {
+                    updateUndockingSetpoint();
                 }
                 // desired_pitch_angle_ is frozen when the command is accepted.
                 double desired_pitch = desired_pitch_angle_;
@@ -723,6 +772,12 @@ private:
                     turret_->ActuateFinalInsertionFreePitch(
                         static_cast<float>(desired_length_),
                         static_cast<float>(max_velocity));
+                } else if (current_state_ == TurretState::UNDOCKING &&
+                           undocking_combined_active_) {
+                    turret_->ActuateFixedVelocityPitchAndZipper(
+                        static_cast<float>(desired_length_),
+                        static_cast<float>(max_velocity),
+                        static_cast<float>(undocking_combined_pitch_velocity_radps_));
                 } else {
                     turret_->ActuateTurretCable(
                         static_cast<float>(desired_length_),
@@ -730,6 +785,10 @@ private:
                         static_cast<float>(max_velocity),
                         hold_current_pitch_,
                         current_state_ == TurretState::DOCKING && !docking_final_insertion_active_);
+                }
+                if ((current_state_ == TurretState::DOCKING ||
+                     current_state_ == TurretState::UNDOCKING) && yaw_zeroed_) {
+                    turret_->HoldYawPosition(yaw_hold_target_rad_, yaw_hold_kp_, yaw_hold_kd_);
                 }
 
     // RCLCPP_INFO(this->get_logger(),
@@ -904,6 +963,9 @@ private:
                 break;
             case TurretState::DOCKING:
                 state_msg.status_message = "Turret is DOCKING";
+                break;
+            case TurretState::UNDOCKING:
+                state_msg.status_message = "Turret is UNDOCKING";
                 break;
             case TurretState::TELEOP:
                 state_msg.status_message = "Turret is in TELEOP mode";
@@ -1535,6 +1597,96 @@ private:
             lateral_error);
     }
 
+    void updateUndockingSetpoint()
+    {
+        if (!turret_ || !pitch_zeroed_) {
+            return;
+        }
+
+        const double target_extension = std::clamp(
+            undocking_target_extension_m_,
+            0.0,
+            docking_extension_max_m_);
+        const double target_pitch = std::clamp(
+            undocking_target_pitch_rad_,
+            -docking_pitch_limit_rad_,
+            docking_pitch_hold_cap_rad_);
+        const bool pitch_only_phase_active =
+            undocking_pitch_only_active_ &&
+            this->now() < undocking_pitch_only_deadline_;
+
+        desired_pitch_angle_ = target_pitch;
+        hold_current_pitch_ = false;
+
+        if (pitch_only_phase_active) {
+            desired_length_ = current_extension_;
+            desired_velocity_ = 0.0;
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "Undocking pitch-only phase: ext=%.3f m target_pitch=%.2f deg current_pitch=%.2f deg time_left=%.2f s",
+                current_extension_,
+                target_pitch * 180.0 / M_PI,
+                current_pitch_angle_ * 180.0 / M_PI,
+                std::max(0.0, (undocking_pitch_only_deadline_ - this->now()).seconds()));
+            return;
+        }
+
+        if (undocking_pitch_only_active_) {
+            undocking_pitch_only_active_ = false;
+            undocking_combined_active_ = undocking_combined_retract_duration_sec_ > 0.0;
+            undocking_combined_deadline_ =
+                this->now() + rclcpp::Duration::from_seconds(std::max(0.0, undocking_combined_retract_duration_sec_));
+            const double retract_direction = (target_pitch < current_pitch_angle_) ? -1.0 : 1.0;
+            undocking_combined_pitch_velocity_radps_ = retract_direction *
+                std::max(0.2, std::fabs(undocking_retract_velocity_));
+            RCLCPP_INFO(this->get_logger(),
+                "Undocking combined retract phase armed: ext_target=%.3f m pitch_motor_vel=%.3f rad/s duration=%.2f s",
+                target_extension,
+                undocking_combined_pitch_velocity_radps_,
+                undocking_combined_retract_duration_sec_);
+        }
+
+        if (undocking_combined_active_ &&
+            this->now() < undocking_combined_deadline_ &&
+            current_extension_ > (target_extension + 0.01)) {
+            desired_length_ = target_extension;
+            desired_velocity_ = std::abs(undocking_retract_velocity_);
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "Undocking combined phase: cmd_ext=%.3f m current_ext=%.3f m pitch_motor_vel=%.3f rad/s time_left=%.2f s",
+                desired_length_,
+                current_extension_,
+                undocking_combined_pitch_velocity_radps_,
+                std::max(0.0, (undocking_combined_deadline_ - this->now()).seconds()));
+            return;
+        }
+
+        undocking_combined_active_ = false;
+        desired_length_ = target_extension;
+        desired_velocity_ = std::abs(undocking_retract_velocity_);
+
+        const bool extension_reached = current_extension_ <= (target_extension + 0.01);
+        const bool pitch_reached =
+            std::fabs(current_pitch_angle_ - target_pitch) <= (2.0 * M_PI / 180.0);
+        if (extension_reached && pitch_reached) {
+            desired_velocity_ = 0.0;
+            if (!undocking_target_reached_logged_) {
+                undocking_target_reached_logged_ = true;
+                RCLCPP_INFO(this->get_logger(),
+                    "Undocking target reached: ext=%.3f m pitch=%.2f deg. Holding pose.",
+                    current_extension_,
+                    current_pitch_angle_ * 180.0 / M_PI);
+            }
+        } else {
+            undocking_target_reached_logged_ = false;
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "Undocking retract phase: cmd_ext=%.3f m hold_pitch=%.2f deg current_ext=%.3f m current_pitch=%.2f deg vel=%.2f",
+                desired_length_,
+                desired_pitch_angle_ * 180.0 / M_PI,
+                current_extension_,
+                current_pitch_angle_ * 180.0 / M_PI,
+                desired_velocity_);
+        }
+    }
+
 
     void debugLog()
     {
@@ -1555,6 +1707,43 @@ private:
             turret_->StopAllMotors();
             RCLCPP_INFO(this->get_logger(), "All turret motors stopped");
         }
+    }
+
+    void resetDockingState()
+    {
+        docking_enabled_ = false;
+        docking_stage_active_ = false;
+        docking_acquire_active_ = false;
+        docking_pitch_locked_ = false;
+        docking_final_insertion_settle_active_ = false;
+        docking_final_insertion_active_ = false;
+        docking_final_insertion_complete_ = false;
+        docking_final_insertion_success_logged_ = false;
+        docking_final_insertion_start_extension_m_ = 0.0;
+        docking_final_insertion_goal_extension_m_ = 0.0;
+        docking_final_insertion_hold_pitch_rad_ = 0.0;
+        docking_final_insertion_settle_deadline_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
+        docking_pitch_hold_target_rad_ = current_pitch_angle_;
+        docking_stopped_on_tracking_loss_ = false;
+        docking_frozen_pose_extension_override_ = false;
+        docking_have_last_camera_pose_ = false;
+        docking_stale_pose_count_ = 0;
+        have_camera_estimate_ = false;
+        docking_goal_camera_y_m_ = 0.0;
+        docking_last_camera_y_m_ = 0.0;
+        docking_last_camera_z_m_ = 0.0;
+        docking_last_servo_update_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
+        vision_repeated_pose_callback_count_ = 0;
+    }
+
+    void resetUndockingState()
+    {
+        undocking_pitch_only_active_ = false;
+        undocking_combined_active_ = false;
+        undocking_target_reached_logged_ = false;
+        undocking_pitch_only_deadline_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
+        undocking_combined_deadline_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
+        undocking_combined_pitch_velocity_radps_ = 0.0;
     }
     
     void ensureMotorStopped()
@@ -1752,15 +1941,8 @@ private:
             case TurretState::IDLE:
                 // Stop motor when going to IDLE
                 stopMotor();
-                docking_enabled_ = false;
-                docking_stage_active_ = false;
-                docking_acquire_active_ = false;
-                docking_pitch_locked_ = false;
-                docking_final_insertion_settle_active_ = false;
-                docking_final_insertion_active_ = false;
-                docking_final_insertion_complete_ = false;
-                docking_final_insertion_success_logged_ = false;
-                docking_final_insertion_hold_pitch_rad_ = 0.0;
+                resetDockingState();
+                resetUndockingState();
                 current_state_ = TurretState::IDLE;
                 response->success = true;
                 response->message = "State changed to IDLE";
@@ -1773,15 +1955,8 @@ private:
                 } else {
                     // Stop motor when going to READY
                     stopMotor();
-                    docking_enabled_ = false;
-                    docking_stage_active_ = false;
-                    docking_acquire_active_ = false;
-                    docking_pitch_locked_ = false;
-                    docking_final_insertion_settle_active_ = false;
-                    docking_final_insertion_active_ = false;
-                    docking_final_insertion_complete_ = false;
-                    docking_final_insertion_success_logged_ = false;
-                    docking_final_insertion_hold_pitch_rad_ = 0.0;
+                    resetDockingState();
+                    resetUndockingState();
                     current_state_ = TurretState::READY;
                     response->success = true;
                     response->message = "State changed to READY";
@@ -1793,14 +1968,8 @@ private:
                     response->success = false;
                     response->message = "Cannot go to RUNNING: turret not zeroed";
                 } else {
-                    docking_enabled_ = false;
-                    docking_stage_active_ = false;
-                    docking_acquire_active_ = false;
-                    docking_pitch_locked_ = false;
-                    docking_final_insertion_settle_active_ = false;
-                    docking_final_insertion_active_ = false;
-                    docking_final_insertion_complete_ = false;
-                    docking_final_insertion_success_logged_ = false;
+                    resetDockingState();
+                    resetUndockingState();
                     current_state_ = TurretState::RUNNING;
                     response->success = true;
                     response->message = "State changed to RUNNING";
@@ -1812,6 +1981,7 @@ private:
                     response->success = false;
                     response->message = "Cannot go to DOCKING: turret not zeroed";
                 } else {
+                    resetUndockingState();
                     docking_standoff_m_ = this->get_parameter("docking_standoff_m").as_double();
                     docking_extension_max_m_ = this->get_parameter("docking_extension_max_m").as_double();
                     docking_pitch_limit_rad_ = this->get_parameter("docking_pitch_limit_deg").as_double() * M_PI / 180.0;
@@ -1890,27 +2060,11 @@ private:
                         this->get_parameter("docking_final_insertion_pitch_bias_deg").as_double() * M_PI / 180.0;
                     docking_final_insertion_settle_sec_ =
                         this->get_parameter("docking_final_insertion_settle_sec").as_double();
+                    resetDockingState();
                     docking_enabled_ = true;
                     docking_stage_active_ = true;
-                    docking_acquire_active_ = false;
-                    docking_pitch_locked_ = false;
-                    docking_final_insertion_settle_active_ = false;
-                    docking_final_insertion_active_ = false;
-                    docking_final_insertion_complete_ = false;
-                    docking_final_insertion_success_logged_ = false;
-                    docking_final_insertion_start_extension_m_ = 0.0;
-                    docking_final_insertion_goal_extension_m_ = 0.0;
-                    docking_final_insertion_hold_pitch_rad_ = 0.0;
-                    docking_final_insertion_settle_deadline_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
                     docking_pitch_hold_target_rad_ = current_pitch_angle_;
-                    docking_stopped_on_tracking_loss_ = false;
-                    docking_last_camera_y_m_ = 0.0;
-                    docking_last_camera_z_m_ = 0.0;
-                    docking_have_last_camera_pose_ = false;
-                    docking_stale_pose_count_ = 0;
-                    have_camera_estimate_ = false;
-                    docking_goal_camera_y_m_ = 0.0;
-                    docking_last_servo_update_ = rclcpp::Time(0, 0, this->get_clock()->get_clock_type());
+                    yaw_hold_target_rad_ = current_yaw_angle_;
                     current_state_ = TurretState::DOCKING;
                     response->success = true;
                     response->message = "State changed to DOCKING";
@@ -1953,6 +2107,44 @@ private:
                 }
                 break;
 
+            case TurretState::UNDOCKING:
+                if (!is_zeroed_) {
+                    response->success = false;
+                    response->message = "Cannot go to UNDOCKING: turret not zeroed";
+                } else {
+                    resetDockingState();
+                    resetUndockingState();
+                    undocking_pitch_only_duration_sec_ =
+                        this->get_parameter("undocking_pitch_only_duration_sec").as_double();
+                    undocking_combined_retract_duration_sec_ =
+                        this->get_parameter("undocking_combined_retract_duration_sec").as_double();
+                    undocking_target_extension_m_ =
+                        this->get_parameter("undocking_target_extension_m").as_double();
+                    undocking_target_pitch_rad_ =
+                        this->get_parameter("undocking_target_pitch_deg").as_double() * M_PI / 180.0;
+                    undocking_retract_velocity_ =
+                        this->get_parameter("undocking_retract_velocity").as_double();
+                    undocking_pitch_only_active_ = undocking_pitch_only_duration_sec_ > 0.0;
+                    undocking_pitch_only_deadline_ =
+                        this->now() + rclcpp::Duration::from_seconds(std::max(0.0, undocking_pitch_only_duration_sec_));
+                    desired_length_ = current_extension_;
+                    desired_velocity_ = 0.0;
+                    desired_pitch_angle_ = undocking_target_pitch_rad_;
+                    hold_current_pitch_ = false;
+                    yaw_hold_target_rad_ = current_yaw_angle_;
+                    current_state_ = TurretState::UNDOCKING;
+                    response->success = true;
+                    response->message = "State changed to UNDOCKING";
+                    RCLCPP_INFO(this->get_logger(),
+                        "Undocking armed: pitch_only=%.2f s combined=%.2f s target_ext=%.3f m target_pitch=%.1f deg retract_vel=%.2f",
+                        undocking_pitch_only_duration_sec_,
+                        undocking_combined_retract_duration_sec_,
+                        undocking_target_extension_m_,
+                        undocking_target_pitch_rad_ * 180.0 / M_PI,
+                        undocking_retract_velocity_);
+                }
+                break;
+
             case TurretState::TELEOP:
                 // TELEOP mode allows direct velocity control without zeroing requirement
                 // Enter MIT mode for pitch and yaw motors (if not already in teleop mode)
@@ -1965,13 +2157,8 @@ private:
                 teleop_sz_velocity_ = 0.0;
                 teleop_pitch_velocity_ = 0.0;
                 teleop_yaw_velocity_ = 0.0;
-                docking_enabled_ = false;
-                docking_stage_active_ = false;
-                docking_acquire_active_ = false;
-                docking_pitch_locked_ = false;
-                docking_final_insertion_settle_active_ = false;
-                docking_final_insertion_success_logged_ = false;
-                docking_final_insertion_hold_pitch_rad_ = 0.0;
+                resetDockingState();
+                resetUndockingState();
                 current_state_ = TurretState::TELEOP;
                 response->success = true;
                 response->message = "State changed to TELEOP (direct motor control)";
@@ -1993,12 +2180,8 @@ private:
                 pitch_zeroed_ = false;
                 yaw_zeroed_ = false;
                 is_zeroed_ = false;
-                docking_enabled_ = false;
-                docking_stage_active_ = false;
-                docking_acquire_active_ = false;
-                docking_pitch_locked_ = false;
-                docking_final_insertion_settle_active_ = false;
-                docking_final_insertion_success_logged_ = false;
+                resetDockingState();
+                resetUndockingState();
                 current_state_ = TurretState::TELEOP_ZERO;
                 response->success = true;
                 response->message = "State changed to TELEOP_ZERO (zeroing mode)";

@@ -41,8 +41,8 @@ turret_id: 1
 docking:
   standoff_m: 0.05
   extension_max_m: 0.90
-  pitch_limit_deg: 60.0
-  pitch_hold_cap_deg: 60.0
+  pitch_limit_deg: 65.0
+  pitch_hold_cap_deg: 63.0
   command_velocity: 1.5
   stage_extension_m: 0.05
   stage_pitch_deg: 25.0
@@ -77,12 +77,19 @@ docking:
   visual_vertical_hold_error_m: 0.07
   visual_pitch_limit_guard_deg: 5.0
   final_insertion_enabled: true
-  final_insertion_trigger_distance_m: 0.15
-  final_insertion_vertical_tolerance_m: 0.035
-  final_insertion_extension_m: 0.2
+  final_insertion_trigger_distance_m: 0.18
+  final_insertion_vertical_tolerance_m: 0.070
+  final_insertion_extension_m: 0.16
   final_insertion_velocity: 1.5
   final_insertion_completion_tolerance_m: 0.01
   final_insertion_pitch_tolerance_deg: 2.0
   final_insertion_pitch_bias_deg: 7.0
   final_insertion_pitch_motor_velocity_rad_s: 0.4
   final_insertion_settle_sec: 0.0
+
+undocking:
+  pitch_only_duration_sec: 5.0
+  combined_retract_duration_sec: 3.0
+  target_extension_m: 0.2
+  target_pitch_deg: 40.0
+  retract_velocity: 1.8

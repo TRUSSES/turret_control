@@ -5,6 +5,7 @@ uint8 RUNNING = 2
 uint8 TELEOP = 3
 uint8 TELEOP_ZERO = 4
 uint8 DOCKING = 5
+uint8 UNDOCKING = 6
 
 uint8 state
 float64 extension_length  # Current spiral zipper extension in meters

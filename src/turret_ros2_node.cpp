@@ -61,6 +61,8 @@ public:
         
         // Declare zero velocity parameter
         this->declare_parameter("zero_velocity", -0.2);
+        this->declare_parameter("teleop_yaw_brake_kp", 120.0);
+        this->declare_parameter("teleop_yaw_brake_kd", 2.0);
         this->declare_parameter("docking_standoff_m", 0.30);
         this->declare_parameter("docking_extension_max_m", 0.90);
         this->declare_parameter("docking_pitch_limit_deg", 65.0);
@@ -331,6 +333,8 @@ public:
         // Keep a conservative internal default for spiral zipper zeroing.
         // Actual runtime value comes from the "zero_velocity" parameter.
         zero_velocity_ = -0.2;
+        teleop_yaw_brake_kp_ = this->get_parameter("teleop_yaw_brake_kp").as_double();
+        teleop_yaw_brake_kd_ = this->get_parameter("teleop_yaw_brake_kd").as_double();
         
         RCLCPP_INFO(this->get_logger(), "State machine initialized - State: IDLE, Zeroed: %s", 
             is_zeroed_ ? "true" : "false");
@@ -353,6 +357,9 @@ public:
         teleop_cmd_sub_ = this->create_subscription<turret_control::msg::TurretTeleopCommand>(
             topic_prefix_ + "/teleop_command", 10,
             std::bind(&TurretROS2Node::teleopCommandCallback, this, std::placeholders::_1));
+        yaw_brake_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+            topic_prefix_ + "/yaw_brake", 10,
+            std::bind(&TurretROS2Node::yawBrakeCallback, this, std::placeholders::_1));
 
         // Subscribe to load cell force data published by LoadCellNode
         load_cell_force_sub_ = this->create_subscription<turret_control::msg::LoadCellForce>(
@@ -472,6 +479,11 @@ private:
     bool yaw_zeroed_ = false;      // Yaw motor zeroed
     double current_pitch_angle_ = 0.0;  // Current pitch angle from encoder
     double current_yaw_angle_ = 0.0;    // Current yaw angle from motor feedback
+    bool teleop_yaw_brake_requested_ = false;
+    bool teleop_yaw_brake_active_ = false;
+    double teleop_yaw_brake_target_rad_ = 0.0;
+    double teleop_yaw_brake_kp_ = 120.0;
+    double teleop_yaw_brake_kd_ = 2.0;
     bool docking_enabled_ = false;
     bool vision_tag_visible_ = false;
     bool have_camera_estimate_ = false;
@@ -581,6 +593,7 @@ private:
     // ROS2 subscribers
     rclcpp::Subscription<turret_control::msg::ZipperCommand>::SharedPtr zipper_cmd_sub_;
     rclcpp::Subscription<turret_control::msg::TurretTeleopCommand>::SharedPtr teleop_cmd_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr yaw_brake_sub_;
     rclcpp::Subscription<turret_control::msg::LoadCellForce>::SharedPtr load_cell_force_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr vision_tag_pose_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr vision_tag_visible_sub_;
@@ -589,6 +602,30 @@ private:
     double teleop_sz_velocity_ = 0.0;
     double teleop_pitch_velocity_ = 0.0;
     double teleop_yaw_velocity_ = 0.0;
+
+    void releaseTeleopYawBrake()
+    {
+        teleop_yaw_brake_requested_ = false;
+        teleop_yaw_brake_active_ = false;
+    }
+
+    void updateTeleopYawBrakeTarget()
+    {
+        if (!turret_ || !teleop_yaw_brake_requested_) {
+            return;
+        }
+
+        if (!teleop_yaw_brake_active_) {
+            teleop_yaw_brake_target_rad_ = turret_->GetYawAngle();
+            teleop_yaw_brake_active_ = true;
+            RCLCPP_INFO(this->get_logger(),
+                "Teleop yaw brake engaged at %.3f rad (%.1f deg) with kp=%.2f kd=%.2f",
+                teleop_yaw_brake_target_rad_,
+                teleop_yaw_brake_target_rad_ * 180.0 / M_PI,
+                teleop_yaw_brake_kp_,
+                teleop_yaw_brake_kd_);
+        }
+    }
 
     // ROS2 services
     rclcpp::Service<turret_control::srv::ZeroTurret>::SharedPtr zero_service_;
@@ -834,7 +871,15 @@ private:
 
                 turret_->SetSpiralZipperVelocity(effective_sz_velocity);
                 turret_->SetPitchVelocity(effective_pitch_velocity);
-                turret_->SetYawVelocity(teleop_yaw_velocity_);
+                if (teleop_yaw_brake_requested_) {
+                    updateTeleopYawBrakeTarget();
+                    turret_->HoldYawPosition(teleop_yaw_brake_target_rad_,
+                                             teleop_yaw_brake_kp_,
+                                             teleop_yaw_brake_kd_);
+                } else {
+                    teleop_yaw_brake_active_ = false;
+                    turret_->SetYawVelocity(teleop_yaw_velocity_);
+                }
 
                 // Publish velocity commands
                 publishVelocities();
@@ -931,7 +976,7 @@ private:
         auto vel_msg = turret_control::msg::TurretVelocities();
         vel_msg.spiral_zipper_velocity = teleop_sz_velocity_;
         vel_msg.pitch_velocity = teleop_pitch_velocity_;
-        vel_msg.yaw_velocity = teleop_yaw_velocity_;
+        vel_msg.yaw_velocity = teleop_yaw_brake_requested_ ? 0.0 : teleop_yaw_velocity_;
         velocities_pub_->publish(vel_msg);
     }
 
@@ -1834,9 +1879,10 @@ private:
         teleop_sz_velocity_ = msg->spiral_zipper_velocity;
         teleop_pitch_velocity_ = msg->pitch_velocity;
         teleop_yaw_velocity_ = msg->yaw_velocity;
-
         // Log all non-zero commands at INFO level for debugging
-        if (std::abs(teleop_sz_velocity_) > 0.001 || std::abs(teleop_pitch_velocity_) > 0.001 || std::abs(teleop_yaw_velocity_) > 0.001) {
+        if (std::abs(teleop_sz_velocity_) > 0.001 ||
+            std::abs(teleop_pitch_velocity_) > 0.001 ||
+            std::abs(teleop_yaw_velocity_) > 0.001) {
             RCLCPP_INFO(this->get_logger(),
                 "RX Teleop CMD: sz=%.3f, pitch=%.3f, yaw=%.3f",
                 teleop_sz_velocity_, teleop_pitch_velocity_, teleop_yaw_velocity_);
@@ -1844,6 +1890,28 @@ private:
             RCLCPP_DEBUG(this->get_logger(),
                 "Teleop command: sz_vel=%.3f, pitch_vel=%.3f, yaw_vel=%.3f",
                 teleop_sz_velocity_, teleop_pitch_velocity_, teleop_yaw_velocity_);
+        }
+    }
+
+    void yawBrakeCallback(const std_msgs::msg::Bool::SharedPtr msg)
+    {
+        if (current_state_ != TurretState::TELEOP) {
+            if (msg->data) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                    "Ignoring yaw brake request outside TELEOP");
+            }
+            releaseTeleopYawBrake();
+            return;
+        }
+
+        const bool previous_requested = teleop_yaw_brake_requested_;
+        teleop_yaw_brake_requested_ = msg->data;
+        if (!teleop_yaw_brake_requested_) {
+            teleop_yaw_brake_active_ = false;
+            RCLCPP_INFO(this->get_logger(), "Teleop yaw brake released");
+        } else if (!previous_requested) {
+            teleop_yaw_brake_active_ = false;
+            RCLCPP_INFO(this->get_logger(), "Teleop yaw brake requested");
         }
     }
 

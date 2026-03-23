@@ -79,7 +79,7 @@ docking:
   final_insertion_enabled: true
   final_insertion_trigger_distance_m: 0.18
   final_insertion_vertical_tolerance_m: 0.070
-  final_insertion_extension_m: 0.16
+  final_insertion_extension_m: 0.12
   final_insertion_velocity: 1.5
   final_insertion_completion_tolerance_m: 0.01
   final_insertion_pitch_tolerance_deg: 2.0

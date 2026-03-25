@@ -31,13 +31,13 @@ LoadCellNode::LoadCellNode() : Node("load_cell_node")
     initializeLoadCells(turret_id);
 
     if (load_cell_ready_) {
-        // Each getForce() call blocks for ~100 ms per active chip (HX711 at 10 SPS,
-        // 1 sample per chip).  Setting the timer period longer than the callback
-        // duration avoids the executor accumulating pending work items.
-        // 3 chips × 1 sample = ~300 ms → timer period = 350 ms ≈ ~3 Hz.
-        publish_timer_ = this->create_wall_timer(
-            350ms, std::bind(&LoadCellNode::publishCallback, this));
-        RCLCPP_INFO(this->get_logger(), "Load cell publish timer started (~3 Hz)");
+        // Load-cell publishing is temporarily disabled.
+        // Leave hardware/service initialization intact, but do not start the
+        // periodic publish timer.
+        // publish_timer_ = this->create_wall_timer(
+        //     350ms, std::bind(&LoadCellNode::publishCallback, this));
+        RCLCPP_WARN(this->get_logger(),
+            "Load cell publish timer is disabled; no load cell data will be published.");
     } else {
         RCLCPP_WARN(this->get_logger(),
             "Load cells not ready – publishing will not start. "

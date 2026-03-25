@@ -1879,11 +1879,11 @@ private:
         teleop_sz_velocity_ = msg->spiral_zipper_velocity;
         teleop_pitch_velocity_ = msg->pitch_velocity;
         teleop_yaw_velocity_ = msg->yaw_velocity;
-        // Log all non-zero commands at INFO level for debugging
+        // Keep teleop logging out of INFO; this callback can run at high rate.
         if (std::abs(teleop_sz_velocity_) > 0.001 ||
             std::abs(teleop_pitch_velocity_) > 0.001 ||
             std::abs(teleop_yaw_velocity_) > 0.001) {
-            RCLCPP_INFO(this->get_logger(),
+            RCLCPP_DEBUG(this->get_logger(),
                 "RX Teleop CMD: sz=%.3f, pitch=%.3f, yaw=%.3f",
                 teleop_sz_velocity_, teleop_pitch_velocity_, teleop_yaw_velocity_);
         } else {
@@ -2349,28 +2349,23 @@ int main(int argc, char* argv[])
     signal(SIGTERM, signalHandler);
 
     try {
-        // LoadCellNode is created FIRST so the HX711 chips initialise in a clean
-        // GPIO environment – before the pi3hat (SPI1/GPIO 20-29) and encoder ISRs
-        // (GPIO 16/19) are set up by TurretROS2Node.  Timer callbacks in both nodes
-        // only start firing once executor.spin() is called, so ordering here only
-        // affects GPIO initialisation, not runtime behaviour.
-        auto load_cell_node = std::make_shared<LoadCellNode>();
+        // Load-cell node startup is temporarily disabled.
+        // auto load_cell_node = std::make_shared<LoadCellNode>();
         auto turret_node = std::make_shared<TurretROS2Node>();
         g_turret_node = turret_node;
 
         RCLCPP_INFO(turret_node->get_logger(),
-            "Both nodes created – starting MultiThreadedExecutor");
+            "Turret node created (load cells disabled) – starting MultiThreadedExecutor");
 
-        // MultiThreadedExecutor lets load cell and turret callbacks run in
-        // parallel so slow HX711 bit-banging cannot block the control loop.
+        // MultiThreadedExecutor is retained here even with load cells disabled.
         rclcpp::executors::MultiThreadedExecutor executor;
         executor.add_node(turret_node);
-        executor.add_node(load_cell_node);
+        // executor.add_node(load_cell_node);
         executor.spin();
 
         // Destroy in reverse construction order
         turret_node.reset();
-        load_cell_node.reset();
+        // load_cell_node.reset();
 
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << std::endl;

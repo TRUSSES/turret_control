@@ -2349,23 +2349,28 @@ int main(int argc, char* argv[])
     signal(SIGTERM, signalHandler);
 
     try {
-        // Load-cell node startup is temporarily disabled.
-        // auto load_cell_node = std::make_shared<LoadCellNode>();
+        // LoadCellNode is created FIRST so the HX711 chips initialise in a clean
+        // GPIO environment - before the pi3hat (SPI1/GPIO 20-29) and encoder ISRs
+        // (GPIO 16/19) are set up by TurretROS2Node. Timer callbacks in both nodes
+        // only start firing once executor.spin() is called, so ordering here only
+        // affects GPIO initialisation, not runtime behaviour.
+        auto load_cell_node = std::make_shared<LoadCellNode>();
         auto turret_node = std::make_shared<TurretROS2Node>();
         g_turret_node = turret_node;
 
         RCLCPP_INFO(turret_node->get_logger(),
-            "Turret node created (load cells disabled) – starting MultiThreadedExecutor");
+            "Both nodes created - starting MultiThreadedExecutor");
 
-        // MultiThreadedExecutor is retained here even with load cells disabled.
+        // MultiThreadedExecutor lets load cell and turret callbacks run in
+        // parallel so slow HX711 bit-banging cannot block the control loop.
         rclcpp::executors::MultiThreadedExecutor executor;
         executor.add_node(turret_node);
-        // executor.add_node(load_cell_node);
+        executor.add_node(load_cell_node);
         executor.spin();
 
         // Destroy in reverse construction order
         turret_node.reset();
-        // load_cell_node.reset();
+        load_cell_node.reset();
 
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << std::endl;

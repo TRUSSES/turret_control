@@ -116,6 +116,13 @@ void LoadCellNode::initializeLoadCells(int turret_id)
                 "No calibration file found. Run: "
                 "ros2 run turret_control calibrate_load_cells config/%s",
                 cfg_file.c_str());
+        } else {
+            // Tare with whatever is currently mounted (e.g. spiral zipper) so
+            // getForce() reports delta force only, not the zipper's dead weight.
+            RCLCPP_INFO(this->get_logger(),
+                "Auto-taring to zero out mounted hardware weight...");
+            load_cell_->tare();
+            RCLCPP_INFO(this->get_logger(), "Auto-tare complete. Force readings now relative to current load.");
         }
     } catch (const std::exception& e) {
         RCLCPP_WARN(this->get_logger(),
@@ -197,7 +204,7 @@ void LoadCellNode::tareCallback(
     }
     if (load_cell_ready_) {
         publish_timer_ = this->create_wall_timer(
-            20ms, std::bind(&LoadCellNode::publishCallback, this));
+            350ms, std::bind(&LoadCellNode::publishCallback, this));
     }
 }
 

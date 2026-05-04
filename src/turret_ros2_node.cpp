@@ -2277,15 +2277,16 @@ private:
     {
         (void)request;  // Unused
 
-        // Only allow yaw zeroing in TELEOP_ZERO state
-        if (current_state_ != TurretState::TELEOP_ZERO) {
+        // Allow yaw zeroing in IDLE or TELEOP_ZERO state
+        if (current_state_ != TurretState::TELEOP_ZERO &&
+            current_state_ != TurretState::IDLE) {
             response->success = false;
-            response->message = "Cannot zero yaw: must be in TELEOP_ZERO state";
-            RCLCPP_WARN(this->get_logger(), "Zero yaw denied: not in TELEOP_ZERO state");
+            response->message = "Cannot zero yaw: must be in IDLE or TELEOP_ZERO state";
+            RCLCPP_WARN(this->get_logger(), "Zero yaw denied: not in IDLE or TELEOP_ZERO state");
             return;
         }
 
-        if (yaw_zeroed_) {
+        if (yaw_zeroed_ && current_state_ == TurretState::TELEOP_ZERO) {
             response->success = false;
             response->message = "Yaw already zeroed";
             return;

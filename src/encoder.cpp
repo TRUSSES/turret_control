@@ -47,7 +47,7 @@ int Encoder::Read() const {
 void Encoder::Update() {
   int current_value = Read();
   int difference = current_value - previous_value_;
-  
+
   // Handle wrap-around based on the direction of movement
   // This matches the reference implementation logic
   if (difference > encoder_max_value_ / 2) {
@@ -57,7 +57,7 @@ void Encoder::Update() {
     // Negative wrap-around (e.g., from 0 to 1023)
     difference += (encoder_max_value_ + 1);
   }
-  
+
   // Update continuous encoder count (subtract like reference implementation)
   encoder_count_ -= difference;
   previous_value_ = current_value;

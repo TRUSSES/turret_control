@@ -1,5 +1,78 @@
 # Turret Controller
 
+## AprilTag docking sequence
+
+The DOCK command still uses the existing zero → READY prerequisite. It enables
+the control motors and starts the controller in `include/autonomous_docking.h`:
+
+1. **SEARCH:** hold the current extension and yaw, and pitch down until a fresh
+   AprilTag pose becomes available. The default search covers the allowed pitch
+   range at 8 degrees/second.
+2. **ALIGN:** correct camera lateral error with yaw and vertical error with
+   pitch while holding extension.
+3. **APPROACH:** extend toward the camera while continuing yaw and pitch
+   corrections. Pause extension when alignment leaves its tolerance.
+4. **RECOVERY:** if tracking is lost before the 10 cm handoff, stop all motors,
+   retract 3 cm, then sweep pitch ±10 degrees around the lost-tracking pitch.
+   A fresh pose returns the controller to alignment after retraction finishes.
+5. **INSERT:** at 10 cm with alignment satisfied (5 mm depth deadband), hold yaw
+   and insert at fixed zipper motor speed until docking contact. **There is no
+   insertion travel limit or insertion timer.** Camera loss during this phase
+   does not interrupt insertion. Stale docking-port feedback stops the motors.
+6. **WAIT_FOR_LATCH / COMPLETE:** contact or the port's retained `DOCKING` state
+   stops all motors immediately; `DOCKED` confirms the port's closing sequence
+   completed. The port already closes its latch automatically on contact.
+
+`/turretN/state.status_message` reports the current phase and failure reason,
+and the command-station UI displays it. IDLE stops the turret; a new DOCK request
+starts a new attempt. A fresh unoccupied dock state is required when starting.
+The existing separate dock OPEN_LATCH control is still used before UNDOCK.
+
+All tuning is in `config/config.yaml` under `docking`. These keys replace the
+older stage/acquire/final-insertion-distance settings. ROS overrides use the
+same names prefixed with `docking_`, such as `docking_recovery_retract_m`.
+`target_dock_id` selects `/dockN/state` independently of `turret_id`; restart the
+node after changing that subscription. `target_tag_frame` selects this turret's
+own `/vision/end_effector_tag_pose_camera/<tag_frame>` and
+`/vision/tag_visible/<tag_frame>` topics; restart after changing it too.
+`camera_frame` must match the AprilTag pose frame. The bridge's aggregate
+preferred/fallback stream remains available for visualization and cannot
+switch the autonomous controller to another turret's tag.
+The target dock and tag parameters are read-only after startup; other docking
+tuning changes take effect on the next DOCK request.
+
+Calibrate `yaw_correction_sign` against camera lateral motion on the actual
+robot. Positive pitch is assumed to move down from the homed position, and
+`pitch_down_sign` controls the search direction. The camera goal defaults to
+x = 0, y = 3 cm, z = 10 cm. `zipper_motor_velocity_rad_s` and
+`insertion_velocity_rad_s` are motor angular speeds, while
+`max_extension_rate_m_s` is a Cartesian planning rate. Pitch/yaw and pre-insertion
+extension bounds remain active; search/recovery and latch-wait timeouts are
+separate from the unlimited contact-driven insertion.
+
+The docking message definitions are bundled in `vendor/docking_interfaces`.
+Copy the complete `turret_control` folder to the Pi workspace's `src` directory,
+then run `colcon build --packages-select turret_control --cmake-clean-cache`.
+The build generates the existing `docking/msg/DockingState` and
+`docking/msg/DockingCommand` types, so the turret can receive the docking port's
+state using only this folder. Keep the bundled message definitions in sync with
+the docking port whenever its message layout changes.
+
+The bridge rejects detections older than 0.5 seconds, and the turret separately
+checks the detection stamp and receipt age; the camera and turret ROS clocks
+must be synchronized.
+
+The controller can be tested without ROS or hardware:
+
+```bash
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude \
+  tests/test_autonomous_docking.cpp -o /tmp/test_autonomous_docking
+/tmp/test_autonomous_docking
+```
+
+With ROS installed, `colcon test --packages-select turret_control` also runs
+the same controller tests through CTest.
+
 ![Build: Manual](https://img.shields.io/badge/Build-Manual-informational?style=for-the-badge)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg?style=for-the-badge)](https://en.cppreference.com/w/cpp/17)
 
@@ -137,4 +210,3 @@ make
 ```
 
 This builds both the main executable (turret) and the test binary (turret_tests).
-

@@ -328,13 +328,15 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   } else {
     zipper_velocity = std::clamp(zipper_velocity, kMinCommandVelocity, kMaxCommandVelocity);
   }
+  const double requested_zipper_speed_limit = zipper_velocity;
   constexpr double kMinTrackingZipperVelocity = 1.5;
   const double reference_zipper_speed = std::max(
       kMinTrackingZipperVelocity,
       std::min(kMaxCommandVelocity, std::fabs(reference_extension_velocity) * 80.0 + 0.30));
   zipper_velocity = std::min(zipper_velocity, reference_zipper_speed);
   if (std::fabs(goal_zipper_error) > 0.003) {
-    zipper_velocity = std::max(zipper_velocity, kMinTrackingZipperVelocity);
+    zipper_velocity = std::max(zipper_velocity,
+        std::min(requested_zipper_speed_limit, kMinTrackingZipperVelocity));
   }
   zipper_velocity = std::clamp(zipper_velocity, kMinCommandVelocity, kMaxCommandVelocity);
 
@@ -415,6 +417,17 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   ResetCoordinatedTrajectory(zipper_extension, current_pitch_angle);
   pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
   return true;
+}
+
+void Turret::ActuateDockingInsertion(double zipper_motor_velocity_rad_s) {
+  // Bypass position trajectories: only docking contact ends this insertion.
+  ResetCoordinatedTrajectory(spiral_zipper_.GetExtension(), GetPitchAngle());
+  spiral_zipper_.SetMotorVelocity(std::clamp(zipper_motor_velocity_rad_s, 0.0, 2.0));
+  double pitch_release_velocity = final_insertion_pitch_motor_velocity_radps_;
+  if (turret_limit_switch_.IsPressed()) {
+    pitch_release_velocity = 0.0;
+  }
+  pitch_motor_->sendCommandMITMode(0.0, pitch_release_velocity, 0.0, 2.0, 0.0);
 }
 
 bool Turret::ActuateFinalInsertionFreePitch(float goal_dist, float max_zipper_velocity) {
@@ -801,15 +814,19 @@ double Turret::GetPitchMotorAngle() const {
 }
 
 void Turret::EnterTeleopMode() {
+  EnableControlMotors();
+}
+
+void Turret::EnableControlMotors() {
   if (pitch_motor_) {
     pitch_motor_->enterMITMode();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    std::cout << "DEBUG: Pitch motor entered MIT mode for teleop" << std::endl;
+    std::cout << "DEBUG: Pitch motor entered MIT control mode" << std::endl;
   }
   if (yaw_motor_) {
     yaw_motor_->enterMITMode();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    std::cout << "DEBUG: Yaw motor entered MIT mode for teleop" << std::endl;
+    std::cout << "DEBUG: Yaw motor entered MIT control mode" << std::endl;
   }
 }
 

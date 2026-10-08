@@ -13,6 +13,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 # -------------------------------
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -27,6 +28,10 @@ find_package(yaml-cpp REQUIRED)
 # -------------------------------
 # Generate ROS2 interfaces
 # -------------------------------
+# Generate the bundled docking interfaces before this package's interfaces so
+# each ament project starts with its own package/export state.
+add_subdirectory(vendor/docking_interfaces)
+
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TurretState.msg"
   "msg/ZipperCommand.msg"
@@ -74,6 +79,7 @@ target_include_directories(turret_ros2_node PRIVATE include)
 
 ament_target_dependencies(turret_ros2_node
   rclcpp
+  rcl_interfaces
   std_msgs
   geometry_msgs
   sensor_msgs
@@ -88,7 +94,8 @@ target_link_libraries(turret_ros2_node
 
 # Link generated interfaces
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
-target_link_libraries(turret_ros2_node "${cpp_typesupport_target}")
+rosidl_get_typesupport_target(docking_cpp_typesupport_target docking "rosidl_typesupport_cpp")
+target_link_libraries(turret_ros2_node "${cpp_typesupport_target}" "${docking_cpp_typesupport_target}")
 
 # Make sure the executable depends on the generated interfaces
 add_dependencies(turret_ros2_node ${PROJECT_NAME})
@@ -189,6 +196,10 @@ install(DIRECTORY launch/
 )
 
 if(BUILD_TESTING)
+  enable_testing()
+  add_executable(test_autonomous_docking tests/test_autonomous_docking.cpp)
+  target_include_directories(test_autonomous_docking PRIVATE include)
+  add_test(NAME autonomous_docking COMMAND test_autonomous_docking)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
 endif()

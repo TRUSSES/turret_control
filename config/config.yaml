@@ -39,53 +39,64 @@ pitch_angle_offset_deg: 0.0
 turret_id: 1
 
 docking:
-  standoff_m: 0.05
-  extension_max_m: 0.90
-  pitch_limit_deg: 65.0
-  pitch_hold_cap_deg: 63.0
-  command_velocity: 1.5
-  stage_extension_m: 0.05
-  stage_pitch_deg: 25.0
-  stage_pitch_tolerance_deg: 1.0
-  stage_min_pitch_deg: 18.0
-  stage_extension_tolerance_m: 0.005
-  acquire_extension_m: 0.04
-  acquire_vertical_tolerance_m: 0.015
-  camera_filter_alpha: 0.2
+  # This dock ID is independent of turret_id.
+  target_dock_id: 1
+  target_tag_frame: tag36h11_0
+  camera_frame: camera_link
+  goal_camera_x_m: 0.0
+  goal_camera_y_m: 0.03
+  insertion_distance_m: 0.10
+  lateral_tolerance_m: 0.015
+  vertical_tolerance_m: 0.02
+  lateral_deadband_m: 0.005
+  vertical_deadband_m: 0.005
+  depth_deadband_m: 0.005
   pose_timeout_sec: 0.5
-  lateral_tolerance_m: 0.05
-  hold_on_lateral_error: false
-  lock_goal_camera_y_on_stage_complete: true
-  goal_camera_y_offset_m: 0.03
-  stop_on_close_tracking_loss: true
-  tracking_loss_stop_distance_m: 0.14
+  state_timeout_sec: 0.5
+  command_period_sec: 0.1
+  max_dt_sec: 0.1
   camera_forward_sign: 1.0
   camera_vertical_sign: 1.0
-  visual_extension_kp: 1.8
-  visual_pitch_kp: 22.0
-  visual_max_extension_rate_mps: 0.30
-  visual_max_pitch_rate_deg_s: 80.0
-  visual_distance_deadband_m: 0.01
-  visual_vertical_deadband_m: 0.01
-  visual_command_period_sec: 0.5
-  visual_pitch_command_horizon_sec: 0.25
-  visual_extension_step_max_m: 0.04
-  visual_pitch_step_max_deg: 12.0
-  visual_slowdown_start_m: 0.30
-  visual_near_goal_scale: 0.15
-  visual_vertical_priority_error_m: 0.035
-  visual_vertical_hold_error_m: 0.07
-  visual_pitch_limit_guard_deg: 5.0
-  final_insertion_enabled: true
-  final_insertion_trigger_distance_m: 0.18
-  final_insertion_vertical_tolerance_m: 0.070
-  final_insertion_extension_m: 0.12
-  final_insertion_velocity: 1.5
-  final_insertion_completion_tolerance_m: 0.01
-  final_insertion_pitch_tolerance_deg: 2.0
-  final_insertion_pitch_bias_deg: 7.0
+  # Positive measured pitch moves down from the homed position.
+  pitch_down_sign: 1.0
+  pitch_min_deg: 0.0
+  pitch_max_deg: 63.0
+  # Set yaw_correction_sign after checking motor direction against camera x.
+  yaw_correction_sign: 1.0
+  yaw_limit_from_start_deg: 30.0
+  pitch_gain_rad_per_m: 10.0
+  yaw_gain: 1.5
+  extension_gain: 0.8
+  max_pitch_rate_deg_s: 20.0
+  max_yaw_rate_deg_s: 15.0
+  max_extension_rate_m_s: 0.04
+  max_pitch_step_deg: 2.0
+  max_yaw_step_deg: 2.0
+  max_extension_step_m: 0.01
+  # These extension bounds apply to vision approach/recovery, not insertion.
+  extension_min_m: 0.0
+  extension_max_m: 0.90
+  zipper_motor_velocity_rad_s: 1.5
+  initial_search_extension_m: -1.0  # Hold the extension measured when DOCK starts.
+  search_pitch_span_deg: 63.0
+  search_pitch_rate_deg_s: 8.0
+  search_timeout_sec: 20.0
+  alignment_timeout_sec: 20.0
+  approach_timeout_sec: 40.0
+  recovery_retract_m: 0.03
+  recovery_retract_velocity_rad_s: 0.5
+  recovery_extension_tolerance_m: 0.003
+  recovery_pitch_span_deg: 10.0
+  recovery_pitch_endpoint_tolerance_deg: 1.0
+  recovery_pitch_rate_deg_s: 8.0
+  recovery_retract_timeout_sec: 8.0
+  recovery_sweep_timeout_sec: 15.0
+  max_recovery_attempts: 2
+  # Insertion runs at fixed motor velocity until contact, with NO travel/time cutoff.
+  # Zipper speeds below are motor rad/s, not extension m/s.
+  insertion_velocity_rad_s: 0.3
   final_insertion_pitch_motor_velocity_rad_s: 0.4
-  final_insertion_settle_sec: 0.0
+  latch_timeout_sec: 8.0
 
 undocking:
   pitch_only_duration_sec: 5.0

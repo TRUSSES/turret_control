@@ -211,7 +211,7 @@ void SpiralZipper::ActuateLength(float goal_dist, double max_velocity) {
 }
 
 void SpiralZipper::Stop() {
-  servo_motor_.setTargetVelocity(0.0);
+  servo_motor_.stop();
 }
 
 int SpiralZipper::GetEncoderCount() const {

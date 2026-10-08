@@ -21,6 +21,9 @@ class Turret {
   bool ActuateTurretCable(float goal_dist, float desired_pitch_rad, float max_zipper_velocity,
                          bool hold_pitch = false, bool prioritize_pitch = false);
   bool ActuateFinalInsertionFreePitch(float goal_dist, float max_zipper_velocity);
+  // Continue insertion at motor velocity until the ROS docking controller stops it.
+  // There is deliberately no insertion distance or elapsed-time cutoff.
+  void ActuateDockingInsertion(double zipper_motor_velocity_rad_s);
   bool ActuateFixedVelocityPitchAndZipper(float goal_dist,
                                           float max_zipper_velocity,
                                           float pitch_motor_velocity_rad_s);
@@ -50,6 +53,7 @@ class Turret {
 
   // Direct velocity control methods for teleop mode
   void EnterTeleopMode();
+  void EnableControlMotors();
   void ExitTeleopMode();
   void SetSpiralZipperVelocity(double velocity);
   void SetPitchVelocity(double velocity);

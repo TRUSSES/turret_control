@@ -140,6 +140,15 @@ void ServoCityMotor::update() {
     last_encoder_time_ = now_enc;
   }
 
+  // A stopped docking controller must keep PWM off, even with residual PID
+  // error or integral from insertion. Zero target velocity means no drive.
+  if (std::abs(target_velocity_) < 1e-9) {
+    resetPID();
+    gpioWrite(dir_pin_, 0);
+    gpioPWM(pwm_pin_, 0);
+    return;
+  }
+
   // Full PID control with all three terms
   double current = current_velocity_.load();
   double error = target_velocity_ - current;
@@ -206,7 +215,7 @@ double ServoCityMotor::countsToRadians(int counts) const {
 }
 
 void ServoCityMotor::stop() {
-  std::cout << "[Motor PWM:" << pwm_pin_ << "] STOP called" << std::endl;
+  const bool was_commanded = std::abs(target_velocity_) >= 1e-9;
   
   // Stop motor exactly like working test:
   // 1. Set PWM to 0
@@ -218,8 +227,11 @@ void ServoCityMotor::stop() {
   // 3. Clear target velocity
   target_velocity_ = 0.0;
   current_velocity_ = 0.0;
+  resetPID();
   
-  std::cout << "[Motor PWM:" << pwm_pin_ << "] STOPPED (PWM=0, DIR=0)" << std::endl;
+  if (was_commanded) {
+    std::cout << "[Motor PWM:" << pwm_pin_ << "] STOPPED (PWM=0, DIR=0)" << std::endl;
+  }
 }
 
 void ServoCityMotor::setMotorOutput(int pwm) {

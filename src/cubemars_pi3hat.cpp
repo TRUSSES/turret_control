@@ -2,6 +2,7 @@
 #include <iostream>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 CubemarsPi3Hat::CubemarsPi3Hat(int motor_id, int can_bus, mjbots::pi3hat::Pi3Hat* pi3hat)
     : motor_id_(motor_id), can_bus_(can_bus), pi3hat_(pi3hat)
@@ -145,6 +146,8 @@ bool CubemarsPi3Hat::unpackReply(const mjbots::pi3hat::CanFrame &frame) {
     motor_data_.torque   = uint_to_float(i_int, -T_MAX, T_MAX, 12);
     motor_data_.temperature = static_cast<float>(frame.data[6]) - 40;
     motor_data_.error_flag = frame.data[7];
+    last_feedback_time_ = std::chrono::steady_clock::now();
+    have_feedback_ = true;
 
     return true;
 }
@@ -154,3 +157,12 @@ float CubemarsPi3Hat::getVelocity() const { return motor_data_.velocity; }
 float CubemarsPi3Hat::getTorque() const { return motor_data_.torque; }
 float CubemarsPi3Hat::getTemperature() const { return motor_data_.temperature; }
 int CubemarsPi3Hat::getErrorFlag() const { return motor_data_.error_flag; }
+
+bool CubemarsPi3Hat::HasRecentFeedback(double max_age_sec) const {
+    if (!have_feedback_ || !std::isfinite(max_age_sec) || max_age_sec <= 0.0) {
+        return false;
+    }
+    const double age_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - last_feedback_time_).count();
+    return age_sec >= 0.0 && age_sec <= max_age_sec;
+}

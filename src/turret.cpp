@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 #include <thread>
 
 Turret::Turret(const YAML::Node &node)
@@ -80,9 +81,13 @@ double Turret::ToKinematicPitchAngle(double pitch_angle_rad) const {
 }
 
 void Turret::Update() {
+  UpdateEncoders();
+  spiral_zipper_.UpdateMotor();  // Critical: Update motor control loop
+}
+
+void Turret::UpdateEncoders() {
   turret_encoder_.Update();
   spiral_zipper_.UpdateEncoder();
-  spiral_zipper_.UpdateMotor();  // Critical: Update motor control loop
 }
 
 double Turret::ComputeCableLength(float extension, double pitch_angle_rad) const {
@@ -279,7 +284,8 @@ void Turret::UpdateCoordinatedTrajectory(double goal_extension,
 }
 
 bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float max_zipper_velocity,
-                                bool hold_pitch, bool prioritize_pitch) {
+                                bool hold_pitch, bool prioritize_pitch,
+                                double max_pitch_motor_velocity_rad_s) {
   if (!pitch_motor_) {
     std::cerr << "ActuateTurretCable aborted: pitch motor unavailable" << std::endl;
     return false;
@@ -395,6 +401,12 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   desired_pitch_motor_velocity = std::clamp(desired_pitch_motor_velocity,
                                             -max_omega_rad_,
                                             max_omega_rad_);
+  if (max_pitch_motor_velocity_rad_s > 0.0) {
+    // Apply the caller's cap after the minimum tracking-speed boost.
+    desired_pitch_motor_velocity = std::clamp(desired_pitch_motor_velocity,
+                                              -max_pitch_motor_velocity_rad_s,
+                                              max_pitch_motor_velocity_rad_s);
+  }
   pitch_motor_->sendCommandMITMode(0.0, desired_pitch_motor_velocity, 0.0, 1.8, 0.0);
 
   bool pitch_reached = final_pitch_reached;
@@ -419,15 +431,145 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   return true;
 }
 
-void Turret::ActuateDockingInsertion(double zipper_motor_velocity_rad_s) {
-  // Bypass position trajectories: only docking contact ends this insertion.
-  ResetCoordinatedTrajectory(spiral_zipper_.GetExtension(), GetPitchAngle());
-  spiral_zipper_.SetMotorVelocity(std::clamp(zipper_motor_velocity_rad_s, 0.0, 2.0));
-  double pitch_release_velocity = final_insertion_pitch_motor_velocity_radps_;
-  if (turret_limit_switch_.IsPressed()) {
-    pitch_release_velocity = 0.0;
+double Turret::ComputeDockingPitchMotorVelocity(
+    double target_pitch_rad, double current_pitch_rad,
+    double max_pitch_motor_velocity_rad_s) const {
+  constexpr double kPitchHoldDeadband = 0.008726646259971648;  // 0.5 deg
+  constexpr double kMinTrackingPitchVelocity = 0.20;  // Existing tracking correction, rad/s
+  if (!std::isfinite(target_pitch_rad) || !std::isfinite(current_pitch_rad) ||
+      !std::isfinite(max_pitch_motor_velocity_rad_s) ||
+      max_pitch_motor_velocity_rad_s < 0.0 ||
+      (max_pitch_motor_velocity_rad_s > 0.0 &&
+       max_pitch_motor_velocity_rad_s < kMinTrackingPitchVelocity)) {
+    throw std::invalid_argument(
+        "Docking pitch requires finite angles and a motor velocity cap of 0 or at least 0.20 rad/s");
   }
-  pitch_motor_->sendCommandMITMode(0.0, pitch_release_velocity, 0.0, 2.0, 0.0);
+
+  const double pitch_error = target_pitch_rad - current_pitch_rad;
+  if (std::fabs(pitch_error) <= kPitchHoldDeadband) {
+    return 0.0;
+  }
+  double pitch_motor_velocity = std::clamp(
+      pitch_kp_ * pitch_error, -max_omega_rad_, max_omega_rad_);
+  if (std::fabs(pitch_motor_velocity) < kMinTrackingPitchVelocity) {
+    pitch_motor_velocity = std::copysign(kMinTrackingPitchVelocity, pitch_error);
+  }
+  if (turret_limit_switch_.IsPressed() && pitch_motor_velocity < 0.0) {
+    return 0.0;
+  }
+  if (max_pitch_motor_velocity_rad_s > 0.0) {
+    pitch_motor_velocity = std::clamp(pitch_motor_velocity,
+                                      -max_pitch_motor_velocity_rad_s,
+                                      max_pitch_motor_velocity_rad_s);
+  }
+  return pitch_motor_velocity;
+}
+
+void Turret::ActuateDockingPitch(double target_pitch_rad,
+                                double max_pitch_motor_velocity_rad_s) {
+  // A position target at the current extension does not guarantee an immediate stop.
+  spiral_zipper_.Stop();
+  if (!pitch_motor_) {
+    throw std::runtime_error("ActuateDockingPitch aborted: pitch motor unavailable");
+  }
+  turret_encoder_.Update();
+  const double pitch_motor_velocity = ComputeDockingPitchMotorVelocity(
+      target_pitch_rad, GetPitchAngle(), max_pitch_motor_velocity_rad_s);
+  coordinated_trajectory_active_ = false;
+  coordinated_trajectory_initialized_ = false;
+  pitch_motor_->sendCommandMITMode(0.0, pitch_motor_velocity, 0.0, 1.8, 0.0);
+}
+
+void Turret::ActuateDockingAdvance(double zipper_velocity_rad_s, double hold_pitch_rad,
+                                  double max_pitch_motor_velocity_rad_s,
+                                  double max_extension_m) {
+  if (!pitch_motor_) {
+    throw std::runtime_error("ActuateDockingAdvance aborted: pitch motor unavailable");
+  }
+  if (!std::isfinite(zipper_velocity_rad_s) || !std::isfinite(max_extension_m) ||
+      max_extension_m < 0.0) {
+    throw std::invalid_argument("ActuateDockingAdvance requires finite velocity and nonnegative extension limit");
+  }
+
+  turret_encoder_.Update();
+  spiral_zipper_.UpdateEncoder();
+  const double current_pitch_angle = GetPitchAngle();
+  const double current_extension = spiral_zipper_.GetExtension();
+  const double pitch_motor_velocity = ComputeDockingPitchMotorVelocity(
+      hold_pitch_rad, current_pitch_angle, max_pitch_motor_velocity_rad_s);
+
+  // The docking state machine times the burst; bypass position trajectories.
+  ResetCoordinatedTrajectory(current_extension, current_pitch_angle);
+  if (current_extension >= max_extension_m) {
+    spiral_zipper_.Stop();
+  } else {
+    spiral_zipper_.SetMotorVelocity(std::clamp(zipper_velocity_rad_s, 0.0, 2.0));
+  }
+  pitch_motor_->sendCommandMITMode(0.0, pitch_motor_velocity, 0.0, 1.8, 0.0);
+}
+
+void Turret::ActuateDockingInsertion(double zipper_motor_velocity_rad_s, double hold_pitch_rad,
+                                    double max_pitch_motor_velocity_rad_s) {
+  if (!pitch_motor_) {
+    throw std::runtime_error("ActuateDockingInsertion aborted: pitch motor unavailable");
+  }
+  if (!std::isfinite(zipper_motor_velocity_rad_s) || !std::isfinite(hold_pitch_rad)) {
+    throw std::invalid_argument("ActuateDockingInsertion requires finite velocity and pitch");
+  }
+
+  turret_encoder_.Update();
+  const double current_pitch_angle = GetPitchAngle();
+  const double pitch_motor_velocity = ComputeDockingPitchMotorVelocity(
+      hold_pitch_rad, current_pitch_angle, max_pitch_motor_velocity_rad_s);
+
+  // Bypass position trajectories: only docking contact ends this insertion.
+  ResetCoordinatedTrajectory(spiral_zipper_.GetExtension(), current_pitch_angle);
+  spiral_zipper_.SetMotorVelocity(std::clamp(zipper_motor_velocity_rad_s, 0.0, 2.0));
+  // Pay out or take up cable using measured joint-pitch error as the zipper
+  // extends. Keep the handoff pitch; do not lock the cable spool's motor angle.
+  pitch_motor_->sendCommandMITMode(0.0, pitch_motor_velocity, 0.0, 1.8, 0.0);
+}
+
+void Turret::ActuateUndockingRetraction(double zipper_motor_velocity_rad_s,
+                                      double target_pitch_rad, double minimum_extension_m,
+                                      double max_pitch_motor_velocity_rad_s,
+                                      double maximum_pitch_rad) {
+  if (!pitch_motor_) {
+    throw std::runtime_error("ActuateUndockingRetraction aborted: pitch motor unavailable");
+  }
+  if (!std::isfinite(zipper_motor_velocity_rad_s) || zipper_motor_velocity_rad_s >= 0.0 ||
+      !std::isfinite(target_pitch_rad) || !std::isfinite(maximum_pitch_rad) ||
+      !std::isfinite(minimum_extension_m) ||
+      minimum_extension_m < 0.0) {
+    throw std::invalid_argument(
+        "ActuateUndockingRetraction requires negative finite velocity, finite pitch/cap and nonnegative extension floor");
+  }
+
+  turret_encoder_.Update();
+  spiral_zipper_.UpdateEncoder();
+  const double current_pitch_angle = GetPitchAngle();
+  const double current_extension = spiral_zipper_.GetExtension();
+  double pitch_motor_velocity = ComputeDockingPitchMotorVelocity(
+      std::min(target_pitch_rad, maximum_pitch_rad), current_pitch_angle,
+      max_pitch_motor_velocity_rad_s);
+  const bool pitch_above_limit = current_pitch_angle > maximum_pitch_rad;
+  if (pitch_above_limit && pitch_motor_velocity == 0.0 && !turret_limit_switch_.IsPressed()) {
+    // The ordinary 0.5-degree deadband must not leave the turret just above
+    // its bound. Continue a minimum upward correction with the zipper stopped.
+    pitch_motor_velocity = -0.20;
+  }
+
+  // Retraction bypasses position trajectories and preserves the motor sign.
+  ResetCoordinatedTrajectory(current_extension, current_pitch_angle);
+  if (current_extension <= minimum_extension_m || spiral_zipper_.IsLimitSwitchPressed() ||
+      pitch_above_limit) {
+    spiral_zipper_.Stop();
+  } else {
+    spiral_zipper_.SetMotorVelocity(std::clamp(zipper_motor_velocity_rad_s, -2.0, 0.0));
+  }
+  // Joint feedback adjusts cable payout/takeup as the zipper retracts; it also
+  // maintains the requested pitch after the extension floor stops the zipper.
+  pitch_motor_->sendCommandMITMode(0.0, pitch_motor_velocity, 0.0, 1.8, 0.0);
 }
 
 bool Turret::ActuateFinalInsertionFreePitch(float goal_dist, float max_zipper_velocity) {
@@ -613,6 +755,9 @@ bool Turret::ZeroTurret(double retract_velocity, double pitch_velocity_ratio) {
       return false;
     }
 
+    // The async zeroing worker owns hardware updates until it returns. Keep
+    // both continuous encoder counts current before capturing either zero.
+    Update();
     ++loop_counter;
     float current_pitch_vel = pitch_motor_->getVelocity();
     float current_pitch_pos = pitch_motor_->getPosition();
@@ -633,11 +778,13 @@ bool Turret::ZeroTurret(double retract_velocity, double pitch_velocity_ratio) {
       if (turret_limit_pressed) {
         pitch_motor_->sendCommandMITMode(0.0, 0.0, 0.0, 0.5, 0.0);
         if (sz_zeroed) {
+          turret_encoder_.Update();
           pitch_encoder_zero_angle_rad_ = GetRawTurretEncoderAngle();
           CapturePitchCableReferenceAtCurrentPose();
           pitch_zeroed = true;
           waiting_for_sz_after_pitch_limit = false;
           std::cout << "Turret limit switch pressed and SZ already zeroed: capturing turret angle reference"
+                    << ", encoder_count=" << turret_encoder_.GetCount()
                     << std::endl;
         } else {
           if (!waiting_for_sz_after_pitch_limit) {
@@ -693,9 +840,7 @@ bool Turret::ZeroTurret(double retract_velocity, double pitch_velocity_ratio) {
       return false;
     }
 
-    turret_encoder_.Update();
-    spiral_zipper_.UpdateEncoder();
-    spiral_zipper_.UpdateMotor();
+    Update();
 
     const bool turret_limit_pressed = turret_limit_switch_.IsPressed();
     const bool sz_limit_pressed = spiral_zipper_.IsLimitSwitchPressed();
@@ -730,10 +875,13 @@ bool Turret::ZeroTurret(double retract_velocity, double pitch_velocity_ratio) {
   turret_encoder_.Update();
   spiral_zipper_.UpdateEncoder();
   const bool turret_limit_released = !turret_limit_switch_.IsPressed();
+  const bool sz_limit_released = !spiral_zipper_.IsLimitSwitchPressed();
   const bool sz_backed_off =
       spiral_zipper_.GetExtension() >= (kBackoffExtensionMeters - kBackoffExtensionToleranceMeters);
-  const bool pitch_backed_off = GetPitchAngle() >= (kBackoffPitchRadians - kBackoffPitchToleranceRadians);
-  if (!turret_limit_released || !sz_backed_off || !pitch_backed_off) {
+  const double backoff_pitch = GetPitchAngle();
+  const bool pitch_backed_off = std::isfinite(backoff_pitch) &&
+      std::fabs(backoff_pitch - kBackoffPitchRadians) <= kBackoffPitchToleranceRadians;
+  if (!turret_limit_released || !sz_limit_released || !sz_backed_off || !pitch_backed_off) {
     std::cout << "ZeroTurret backoff failed: pitch="
               << (GetPitchAngle() * 180.0 / M_PI) << " deg, ext="
               << spiral_zipper_.GetExtension() << " m, turret_limit="
@@ -923,6 +1071,10 @@ double Turret::GetYawMotorVelocity() const {
     return static_cast<double>(yaw_motor_->getVelocity());
   }
   return 0.0;
+}
+
+bool Turret::HasFreshYawFeedback(double max_age_sec) const {
+  return yaw_motor_ && yaw_motor_->HasRecentFeedback(max_age_sec);
 }
 
 double Turret::GetPitchMotorVelocity() const {

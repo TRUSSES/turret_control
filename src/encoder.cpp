@@ -7,6 +7,13 @@ Encoder::Encoder(int cs_pin, int clk_pin, int do_pin, int encoder_max_value, int
       encoder_max_value_(encoder_max_value),
       offset_(offset),
       encoder_count_(0) {
+  // Restore the configured directions even if a previous process left a pin
+  // in another mode. Encoder data must remain an input during CAN traffic.
+  gpioSetMode(cs_pin_, PI_OUTPUT);
+  gpioSetMode(clk_pin_, PI_OUTPUT);
+  gpioSetMode(do_pin_, PI_INPUT);
+  gpioWrite(cs_pin_, PI_HIGH);
+  gpioWrite(clk_pin_, PI_LOW);
   previous_value_ = Read();
 }
 
@@ -19,6 +26,11 @@ Encoder::Encoder(const YAML::Node &node)
 }
 
 int Encoder::Read() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return ReadUnlocked();
+}
+
+int Encoder::ReadUnlocked() const {
   uint16_t value = 0;
   gpioWrite(cs_pin_, PI_LOW);
   gpioDelay(5);
@@ -45,7 +57,8 @@ int Encoder::Read() const {
 }
 
 void Encoder::Update() {
-  int current_value = Read();
+  std::lock_guard<std::mutex> lock(mutex_);
+  int current_value = ReadUnlocked();
   int difference = current_value - previous_value_;
 
   // Handle wrap-around based on the direction of movement
@@ -59,19 +72,21 @@ void Encoder::Update() {
   }
 
   // Update continuous encoder count (subtract like reference implementation)
-  encoder_count_ -= difference;
+  encoder_count_.fetch_sub(difference, std::memory_order_relaxed);
   previous_value_ = current_value;
 }
 
 int Encoder::GetCount() const {
-  return encoder_count_;
+  return encoder_count_.load(std::memory_order_relaxed);
 }
 
 void Encoder::ResetCount() {
-  encoder_count_ = 0;
-  previous_value_ = Read();
+  std::lock_guard<std::mutex> lock(mutex_);
+  previous_value_ = ReadUnlocked();
+  encoder_count_.store(0, std::memory_order_relaxed);
 }
 
 void Encoder::SetOffset(int offset) {
+  std::lock_guard<std::mutex> lock(mutex_);
   offset_ = offset;
 }

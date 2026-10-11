@@ -24,6 +24,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <fstream>
@@ -1701,30 +1702,33 @@ namespace mjbots
         {
           bool any_found = false;
           // Then check for CAN responses as necessary.
-          if (to_check[0] && reply_count_[0] > 0)
+          if (to_check[0] &&
+              (reply_count_[0] > 0 || (input.force_can_check & 0x06)))
           {
             const int count = ReadCanFrames(aux_spi_, 0, 1, &input.rx_can, output);
-            reply_count_[0] -= count;
+            reply_count_[0] = std::max(0, reply_count_[0] - count);
             if (count)
             {
               last_reply = GetNow();
               any_found = true;
             }
           }
-          if (to_check[1] && reply_count_[1] > 0)
+          if (to_check[1] &&
+              (reply_count_[1] > 0 || (input.force_can_check & 0x18)))
           {
             const int count = ReadCanFrames(aux_spi_, 1, 3, &input.rx_can, output);
-            reply_count_[1] -= count;
+            reply_count_[1] = std::max(0, reply_count_[1] - count);
             if (count)
             {
               last_reply = GetNow();
               any_found = true;
             }
           }
-          if (to_check[2] && config_.enable_aux && reply_count_[2] > 0)
+          if (to_check[2] && config_.enable_aux &&
+              (reply_count_[2] > 0 || (input.force_can_check & 0x20)))
           {
             const int count = ReadCanFrames(primary_spi_, 0, 5, &input.rx_can, output);
-            reply_count_[2] -= count;
+            reply_count_[2] = std::max(0, reply_count_[2] - count);
             if (count)
             {
               last_reply = GetNow();
@@ -1782,7 +1786,7 @@ namespace mjbots
           // Then check for CAN responses as necessary.
           {
             const int count = ReadCanFrames(aux_spi_, 0, 1, &input.rx_can, &output);
-            reply_count_[0] -= count;
+            reply_count_[0] = std::max(0, reply_count_[0] - count);
             if (count)
             {
               last_reply = GetNow();
@@ -1791,7 +1795,7 @@ namespace mjbots
           }
           {
             const int count = ReadCanFrames(aux_spi_, 1, 3, &input.rx_can, &output);
-            reply_count_[1] -= count;
+            reply_count_[1] = std::max(0, reply_count_[1] - count);
             if (count)
             {
               last_reply = GetNow();
@@ -1800,7 +1804,7 @@ namespace mjbots
           }
           {
             const int count = ReadCanFrames(primary_spi_, 0, 5, &input.rx_can, &output);
-            reply_count_[2] -= count;
+            reply_count_[2] = std::max(0, reply_count_[2] - count);
             if (count)
             {
               last_reply = GetNow();
@@ -1861,10 +1865,6 @@ namespace mjbots
 
         ReadCan(input, expected_replies, &result);
 
-        primary_spi_.gpio()->SetGpioMode(13, Rpi3Gpio::OUTPUT);
-        static bool debug_toggle = false;
-        primary_spi_.gpio()->SetGpioOutput(13, debug_toggle);
-        debug_toggle = !debug_toggle;
         return result;
       }
 

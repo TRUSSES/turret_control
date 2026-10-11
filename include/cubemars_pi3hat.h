@@ -1,6 +1,7 @@
 #ifndef CUBEMARS_PI3HAT_H
 #define CUBEMARS_PI3HAT_H
 
+#include <chrono>
 #include <vector>
 #include "pi3hat.h"
 
@@ -22,6 +23,7 @@ public:
     float getTorque() const;
     float getTemperature() const;
     int getErrorFlag() const;
+    bool HasRecentFeedback(double max_age_sec) const;
 
 private:
     int float_to_uint(float x, float x_min, float x_max, int bits);
@@ -51,6 +53,9 @@ private:
         float temperature = 0.0f;
         int error_flag = 0;
     } motor_data_;
+
+    bool have_feedback_ = false;
+    std::chrono::steady_clock::time_point last_feedback_time_;
 
     std::vector<mjbots::pi3hat::CanFrame> tx_can_;
     std::vector<mjbots::pi3hat::CanFrame> rx_can_;

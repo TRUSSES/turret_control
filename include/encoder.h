@@ -2,7 +2,9 @@
 #define ENCODER_H_
 
 #include <pigpio.h>
+#include <atomic>
 #include <iostream>
+#include <mutex>
 #include <yaml-cpp/yaml.h>
 
 class Encoder {
@@ -19,13 +21,15 @@ class Encoder {
   void SetOffset(int offset);
 
  private:
+  int ReadUnlocked() const;
+  mutable std::mutex mutex_;
   int cs_pin_;
   int clk_pin_;
   int do_pin_;
   int encoder_max_value_;
   int offset_;
   int previous_value_;
-  int encoder_count_;
+  std::atomic<int> encoder_count_;
 };
 
 #endif  // ENCODER_H_

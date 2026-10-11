@@ -19,15 +19,33 @@ class Turret {
 
   void Init();
   bool ActuateTurretCable(float goal_dist, float desired_pitch_rad, float max_zipper_velocity,
-                         bool hold_pitch = false, bool prioritize_pitch = false);
+                         bool hold_pitch = false, bool prioritize_pitch = false,
+                         double max_pitch_motor_velocity_rad_s = 0.0);
   bool ActuateFinalInsertionFreePitch(float goal_dist, float max_zipper_velocity);
-  // Continue insertion at motor velocity until the ROS docking controller stops it.
+  // Center the measured turret pitch while keeping the zipper stopped.
+  void ActuateDockingPitch(double target_pitch_rad,
+                          double max_pitch_motor_velocity_rad_s);
+  // Advance at motor velocity while holding pitch, bounded before insertion.
+  void ActuateDockingAdvance(double zipper_velocity_rad_s, double hold_pitch_rad,
+                            double max_pitch_motor_velocity_rad_s,
+                            double max_extension_m);
+  // Hold the turret pitch while inserting until the ROS docking controller stops it.
   // There is deliberately no insertion distance or elapsed-time cutoff.
-  void ActuateDockingInsertion(double zipper_motor_velocity_rad_s);
+  void ActuateDockingInsertion(double zipper_motor_velocity_rad_s, double hold_pitch_rad,
+                              double max_pitch_motor_velocity_rad_s = 0.0);
+  // Retract directly at negative motor velocity while controlling joint pitch.
+  // Stop the zipper at the extension floor, home switch, or measured pitch cap;
+  // keep correcting pitch while stopped.
+  void ActuateUndockingRetraction(double zipper_motor_velocity_rad_s,
+                                 double target_pitch_rad, double minimum_extension_m,
+                                 double max_pitch_motor_velocity_rad_s = 0.35,
+                                 double maximum_pitch_rad = 1.0995574287564276); // 63 deg
   bool ActuateFixedVelocityPitchAndZipper(float goal_dist,
                                           float max_zipper_velocity,
                                           float pitch_motor_velocity_rad_s);
   void Update();
+  // Refresh joint measurements without running the zipper motor controller.
+  void UpdateEncoders();
   
   // Spiral zipper control methods for ROS2 integration
   void ZeroSpiralZipper();
@@ -71,6 +89,7 @@ class Turret {
 
   // Position feedback methods
   double GetYawAngle() const;       // Get yaw position from motor feedback (radians)
+  bool HasFreshYawFeedback(double max_age_sec) const;
   double GetPitchMotorAngle() const;  // Get pitch motor position (radians)
   double GetYawMotorVelocity() const;    // Get yaw motor velocity (rad/s)
   double GetPitchMotorVelocity() const;  // Get pitch motor velocity (rad/s)
@@ -107,6 +126,9 @@ class Turret {
   double final_insertion_pitch_motor_velocity_radps_ = 1.5;
 
   double GetPitchCableLength() const;
+  double ComputeDockingPitchMotorVelocity(double target_pitch_rad,
+                                          double current_pitch_rad,
+                                          double max_pitch_motor_velocity_rad_s) const;
   void CapturePitchCableReferenceAtCurrentPose();
   void ResetCoordinatedTrajectory(double current_extension, double current_pitch_angle);
   void UpdateCoordinatedTrajectory(double goal_extension,

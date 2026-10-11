@@ -44,14 +44,23 @@ docking:
   target_tag_frame: tag36h11_0
   camera_frame: camera_link
   goal_camera_x_m: 0.0
-  goal_camera_y_m: 0.03
-  insertion_distance_m: 0.10
-  lateral_tolerance_m: 0.015
-  vertical_tolerance_m: 0.02
+  goal_camera_y_m: 0.0  # Center the tag on the camera's optical axis.
+  # The first fresh pose at this depth stops the zipper and captures pitch/yaw.
+  # Activate the dock, open its latch, then insert with those same joint holds.
+  # Further camera centering or lateral alignment cannot postpone the handoff.
+  insertion_distance_m: 0.20
+  lateral_tolerance_m: 0.015  # Legacy parameter; no longer gates insertion.
   lateral_deadband_m: 0.005
-  vertical_deadband_m: 0.005
   depth_deadband_m: 0.005
-  pose_timeout_sec: 0.5
+  # Center more tightly before each two-second motor burst.
+  # Stop and re-center earlier if tracking drifts outside the outer window.
+  # Angular tolerances keep the tag near image center at any distance.
+  centering_start_tolerance_deg: 1.0
+  centering_stop_tolerance_deg: 4.0
+  approach_burst_duration_sec: 2.0
+  # Allow the observed camera/delivery delay without treating each gap as failure.
+  # Older poses still stop the approach until a fresh measurement arrives.
+  pose_timeout_sec: 1.0
   state_timeout_sec: 0.5
   command_period_sec: 0.1
   max_dt_sec: 0.1
@@ -66,41 +75,67 @@ docking:
   yaw_limit_from_start_deg: 30.0
   pitch_gain_rad_per_m: 10.0
   yaw_gain: 1.5
-  extension_gain: 0.8
-  max_pitch_rate_deg_s: 20.0
-  max_yaw_rate_deg_s: 15.0
-  max_extension_rate_m_s: 0.04
+  max_pitch_rate_deg_s: 5.0
+  # Cable motor speed is separate from the turret joint target's rate.
+  # Do not cap it below the existing 0.20 rad/s correction minimum.
+  pitch_motor_velocity_limit_rad_s: 0.35
+  max_yaw_rate_deg_s: 5.0
   max_pitch_step_deg: 2.0
-  max_yaw_step_deg: 2.0
-  max_extension_step_m: 0.01
-  # These extension bounds apply to vision approach/recovery, not insertion.
+  # Each correction requests this full step from measured yaw, even if the
+  # camera-guided request is initially smaller than the completion deadband.
+  max_yaw_step_deg: 0.5
+  yaw_position_kp: 160.0
+  yaw_position_kd: 2.0
+  yaw_target_deadband_deg: 0.15
+  yaw_adjustment_timeout_sec: 0.5
+  # Require a capture taken after the previous correction before another step.
+  yaw_observation_pause_sec: 0.2
+  yaw_feedback_timeout_sec: 0.25
+  # These extension bounds apply to the vision approach, not insertion.
   extension_min_m: 0.0
   extension_max_m: 0.90
-  zipper_motor_velocity_rad_s: 1.5
-  initial_search_extension_m: -1.0  # Hold the extension measured when DOCK starts.
+  # Direct motor speed throughout each approach burst, held until its deadline.
+  zipper_motor_velocity_rad_s: 1.2  # Measured minimum that moves this zipper.
   search_pitch_span_deg: 63.0
-  search_pitch_rate_deg_s: 8.0
-  search_timeout_sec: 20.0
-  alignment_timeout_sec: 20.0
-  approach_timeout_sec: 40.0
-  recovery_retract_m: 0.03
-  recovery_retract_velocity_rad_s: 0.5
-  recovery_extension_tolerance_m: 0.003
-  recovery_pitch_span_deg: 10.0
-  recovery_pitch_endpoint_tolerance_deg: 1.0
-  recovery_pitch_rate_deg_s: 8.0
-  recovery_retract_timeout_sec: 8.0
-  recovery_sweep_timeout_sec: 15.0
-  max_recovery_attempts: 2
+  search_pitch_rate_deg_s: 5.0
+  # Send ACTIVATE and then OPEN_LATCH at the camera handoff, not during approach.
+  # Wait for new state feedback after each operation's minimum settling time.
+  dock_activate_settle_sec: 1.0
+  dock_open_settle_sec: 0.6
+  dock_deactivate_settle_sec: 0.3
+  dock_prepare_timeout_sec: 5.0  # Per preparation/recovery wait; NOT an insertion timer.
+  # Additional preparation resets; latch closing has its own budget of this size.
+  # Approach resets require an unoccupied port. Contact switches permanently to
+  # IDLE -> ACTIVATE -> CLOSE_LATCH, keeping the turret stationary throughout.
+  dock_retry_attempts: 4
+  # Search and tracking pauses have no timeout; tracking resumes on a fresh tag.
   # Insertion runs at fixed motor velocity until contact, with NO travel/time cutoff.
   # Zipper speeds below are motor rad/s, not extension m/s.
-  insertion_velocity_rad_s: 0.3
-  final_insertion_pitch_motor_velocity_rad_s: 0.4
+  insertion_velocity_rad_s: 1.2  # Insert at the measured minimum working speed.
   latch_timeout_sec: 8.0
+  latch_close_settle_sec: 0.6
+  # Match docking node's servo1_zero_us. This confirms the commanded pulse;
+  # the docking port has no sensor to confirm physical latch closure.
+  latch_closed_pulse_width_us: 1000
 
 undocking:
-  pitch_only_duration_sec: 5.0
-  combined_retract_duration_sec: 3.0
-  target_extension_m: 0.2
-  target_pitch_deg: 40.0
-  retract_velocity: 1.8
+  # Power-cycle and open the latch before any zipper retraction.
+  dock_deactivate_settle_sec: 0.3
+  dock_activate_settle_sec: 1.0
+  dock_open_settle_sec: 0.6
+  dock_prepare_timeout_sec: 5.0
+  dock_retry_attempts: 4  # Additional cycles; independent of docking retries.
+  # First retract this measured distance with the docking pitch held.
+  # Never retract below target_extension_m to finish clearance.
+  slow_clearance_m: 0.15
+  slow_velocity_rad_s: 1.2
+  # Capture and hold measured pitch after clearance while retracting to 30 cm.
+  # Pause retraction and correct pitch if the measured angle exceeds this cap.
+  fast_velocity_rad_s: 1.8
+  pitch_max_deg: 63.0
+  intermediate_extension_m: 0.30
+  # At 30 cm, adjust toward 20 degrees while retracting to 10 cm, then READY.
+  target_extension_m: 0.10
+  target_pitch_deg: 20.0
+  extension_tolerance_m: 0.005
+  pitch_tolerance_deg: 2.0

@@ -46,7 +46,7 @@ class AutonomousDockingController {
     double max_pitch_rate_rad_s = 5.0 * kRadiansPerDegree;
     double max_yaw_rate_rad_s = 5.0 * kRadiansPerDegree;
     double max_pitch_step_rad = 2.0 * kRadiansPerDegree;
-    double max_yaw_step_rad = 0.5 * kRadiansPerDegree;
+    double max_yaw_step_rad = 1.0 * kRadiansPerDegree;
     double max_dt_sec = 0.1;
     double extension_min_m = 0.0;
     double extension_max_m = 0.90;
@@ -59,10 +59,13 @@ class AutonomousDockingController {
     double approach_burst_duration_sec = 2.0;
     // Power/open the port only at the camera handoff, with the zipper stopped.
     // These waits cover the port's servo initialization/opening operations.
-    double dock_activate_settle_sec = 1.0;
-    double dock_open_settle_sec = 0.6;
+    double dock_activate_settle_sec = 2.0;
+    double dock_open_settle_sec = 1.0;
     double dock_prepare_timeout_sec = 5.0;
-    double dock_deactivate_settle_sec = 0.3;
+    double dock_deactivate_settle_sec = 2.0;
+    // Space all port commands, including contact-triggered and retry cycles,
+    // without blocking joint feedback or the immediate stop on contact.
+    double dock_command_interval_sec = 2.0;
     // Additional cycles across preparation/insertion; latch closing has a
     // separate budget of the same size after its mandatory initial cycle.
     int dock_retry_attempts = 4;
@@ -70,7 +73,7 @@ class AutonomousDockingController {
     // has no travel or time cutoff: fresh push-button contact ends insertion.
     double insertion_velocity_rad_s = 1.2;
     double latch_timeout_sec = 8.0;
-    double latch_close_settle_sec = 0.6;
+    double latch_close_settle_sec = 1.0;
     int latch_closed_pulse_width_us = 1000;
   };
 
@@ -131,6 +134,9 @@ class AutonomousDockingController {
     waiting_for_dock_state_after_settle_ = false;
     recovery_state_sequence_ = 0;
     recovering_insertion_ = false;
+    pending_dock_command_ = DockCommand::NONE;
+    last_dock_command_sec_ = 0.0;
+    have_issued_dock_command_ = false;
   }
 
   void start(const Input& input) {
@@ -182,13 +188,28 @@ class AutonomousDockingController {
 
     // Once contact is observed, stay in latch-only control even if IDLE clears
     // retained DOCKED or the button is released. Never resume insertion here.
-    if (latchPhase()) return updateLatch(input);
+    if (latchPhase()) {
+      if (pending_dock_command_ != DockCommand::NONE) {
+        holdForDock(input);
+        emitPendingDockCommand(input);
+        return output_;
+      }
+      return updateLatch(input);
+    }
     // A reported DOCKED value is a timed command result, not a physical sensor.
     // Force one power cycle and explicit close rather than accepting that old
     // result when the servo may not actually have moved.
     if (input.dock_fresh && (input.dock_detected || input.dock_closing || input.dock_complete)) {
       freeze(input);
       return beginLatchCycle(input);
+    }
+    // Contact above may replace a queued OPEN/ACTIVATE with IDLE. Otherwise,
+    // keep the turret held until the queued command can actually be sent;
+    // no operation timeout or acknowledgement starts during this delay.
+    if (pending_dock_command_ != DockCommand::NONE) {
+      holdForDock(input);
+      emitPendingDockCommand(input);
+      return output_;
     }
     if (phase_ == Phase::DOCK_RECOVER) {
       holdForDock(input);
@@ -228,7 +249,7 @@ class AutonomousDockingController {
         waiting_for_dock_state_after_settle_ = false;
         enter(Phase::DOCK_ACTIVATE, input.now_sec,
               retryStatus("Dock deactivated; activating again while holding pitch and yaw"));
-        output_.dock_command = DockCommand::ACTIVATE;
+        scheduleDockCommand(input, DockCommand::ACTIVATE);
         return output_;
       }
       if (!input.dock_active || !input.dock_relay_active) return output_;
@@ -239,7 +260,7 @@ class AutonomousDockingController {
         waiting_for_dock_state_after_settle_ = false;
         enter(Phase::DOCK_OPEN, input.now_sec,
               retryStatus("Dock activated; opening latch while holding pitch and yaw"));
-        output_.dock_command = DockCommand::OPEN_LATCH;
+        scheduleDockCommand(input, DockCommand::OPEN_LATCH);
         return output_;
       }
       if (!input.dock_latch_open) return output_;
@@ -310,7 +331,7 @@ class AutonomousDockingController {
       enter(Phase::DOCK_ACTIVATE, input.now_sec,
             "Final insertion handoff; activating dock while holding pitch and yaw");
       holdForDock(input);
-      output_.dock_command = DockCommand::ACTIVATE;
+      scheduleDockCommand(input, DockCommand::ACTIVATE);
       return output_;
     }
 
@@ -412,6 +433,9 @@ class AutonomousDockingController {
   bool waiting_for_dock_state_after_settle_ = false;
   std::uint64_t recovery_state_sequence_ = 0;
   bool recovering_insertion_ = false;
+  DockCommand pending_dock_command_ = DockCommand::NONE;
+  double last_dock_command_sec_ = 0.0;
+  bool have_issued_dock_command_ = false;
 
   static bool finite(double value) { return std::isfinite(value); }
   static bool positive(double value) { return finite(value) && value > 0.0; }
@@ -438,7 +462,8 @@ class AutonomousDockingController {
       config_.lateral_tolerance_m, config_.lateral_deadband_m,
       config_.depth_deadband_m, config_.pitch_gain_rad_per_m, config_.yaw_gain,
       config_.dock_activate_settle_sec, config_.dock_open_settle_sec,
-      config_.dock_deactivate_settle_sec, config_.latch_close_settle_sec
+      config_.dock_deactivate_settle_sec, config_.latch_close_settle_sec,
+      config_.dock_command_interval_sec
     };
     for (double value : nonnegative_values) if (!nonnegative(value)) return false;
     return (config_.pitch_down_sign == -1.0 || config_.pitch_down_sign == 1.0) &&
@@ -495,6 +520,8 @@ class AutonomousDockingController {
 
   Output fail(const std::string& status) {
     enter(Phase::FAILED, last_time_sec_, status);
+    pending_dock_command_ = DockCommand::NONE;
+    output_.dock_command = DockCommand::NONE;
     return stopped();
   }
 
@@ -514,6 +541,30 @@ class AutonomousDockingController {
     output_.extension_m = input.extension_m;
     output_.actuation = Actuation::HOLD_PITCH_YAW;
     output_.zipper_motor_velocity_rad_s = 0.0;
+  }
+
+  void scheduleDockCommand(const Input& input, DockCommand command) {
+    // A new command supersedes any pending one, especially when contact
+    // interrupts preparation. The caller has already entered a stopped phase.
+    pending_dock_command_ = command;
+    waiting_for_dock_state_after_settle_ = false;
+    emitPendingDockCommand(input);
+  }
+
+  void emitPendingDockCommand(const Input& input) {
+    if (pending_dock_command_ == DockCommand::NONE ||
+        (have_issued_dock_command_ && input.now_sec - last_dock_command_sec_ <
+            config_.dock_command_interval_sec)) {
+      return;
+    }
+    output_.dock_command = pending_dock_command_;
+    pending_dock_command_ = DockCommand::NONE;
+    last_dock_command_sec_ = input.now_sec;
+    have_issued_dock_command_ = true;
+    // Settling and acknowledgement are measured from actual publication,
+    // rather than from the earlier phase transition that queued this command.
+    phase_start_sec_ = input.now_sec;
+    waiting_for_dock_state_after_settle_ = false;
   }
 
   static bool dockReadyForInsertion(const Input& input) {
@@ -536,7 +587,7 @@ class AutonomousDockingController {
     waiting_for_dock_state_after_settle_ = false;
     enter(Phase::LATCH_DEACTIVATE, input.now_sec,
           latchStatus("Contact retained; deactivating dock before explicit latch close, zipper stopped"));
-    output_.dock_command = DockCommand::IDLE;
+    scheduleDockCommand(input, DockCommand::IDLE);
     return output_;
   }
 
@@ -571,7 +622,7 @@ class AutonomousDockingController {
       waiting_for_dock_state_after_settle_ = false;
       enter(Phase::LATCH_ACTIVATE, input.now_sec,
             latchStatus("Dock deactivated; activating before closing latch"));
-      output_.dock_command = DockCommand::ACTIVATE;
+      scheduleDockCommand(input, DockCommand::ACTIVATE);
       return output_;
     }
     if (!input.dock_active || !input.dock_relay_active || input.dock_latch_open) return output_;
@@ -579,7 +630,7 @@ class AutonomousDockingController {
       waiting_for_dock_state_after_settle_ = false;
       enter(Phase::WAIT_FOR_LATCH, input.now_sec,
             latchStatus("Dock active; sending CLOSE_LATCH with zipper stopped"));
-      output_.dock_command = DockCommand::CLOSE_LATCH;
+      scheduleDockCommand(input, DockCommand::CLOSE_LATCH);
       return output_;
     }
     if (input.dock_latch_pulse_width_us != config_.latch_closed_pulse_width_us) return output_;
@@ -622,7 +673,7 @@ class AutonomousDockingController {
     recovering_insertion_ = false;
     enter(Phase::DOCK_DEACTIVATE, input.now_sec,
           retryStatus("Deactivating dock before activating and opening again; holding pitch and yaw"));
-    output_.dock_command = DockCommand::IDLE;
+    scheduleDockCommand(input, DockCommand::IDLE);
     return output_;
   }
 

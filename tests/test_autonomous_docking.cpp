@@ -25,13 +25,30 @@ bool near(double left, double right, double tolerance = 1e-9) {
   return std::fabs(left - right) <= tolerance;
 }
 
+Controller::Config fastFixtureConfig() {
+  Controller::Config config;
+  config.dock_command_interval_sec = 0.0;
+  config.dock_deactivate_settle_sec = 0.3;
+  config.dock_activate_settle_sec = 1.0;
+  config.dock_open_settle_sec = config.latch_close_settle_sec = 0.6;
+  return config;
+}
+
+Controller::Config fixtureConfig(Controller::Config settings, bool use_command_delay) {
+  // Existing scenarios isolate their original state/settle behavior. The delay
+  // scenarios opt in explicitly and preserve production or custom spacing.
+  if (!use_command_delay) settings.dock_command_interval_sec = 0.0;
+  return settings;
+}
+
 struct Harness {
   Controller::Config config;
   Controller controller;
   Controller::Input input;
 
-  explicit Harness(Controller::Config settings = Controller::Config{})
-      : config(settings), controller(settings) {
+  explicit Harness(Controller::Config settings = fastFixtureConfig(),
+                   bool use_command_delay = false)
+      : config(fixtureConfig(settings, use_command_delay)), controller(config) {
     input.extension_m = 0.25;
     input.pitch_rad = 20.0 * kDeg;
     input.yaw_rad = 0.1;
@@ -837,6 +854,207 @@ void testDockPreparationTimingValidation() {
   harness.recoverToDeactivate();
   harness.deactivateToActivate();
   CHECK(harness.finishPreparation().phase == Phase::INSERT);
+}
+
+Controller::Output waitForSpacedCommand(Harness& harness, Phase phase,
+                                      DockCommand command,
+                                      const Controller::Output& held,
+                                      double& last_command_sec) {
+  const double earliest = last_command_sec + harness.config.dock_command_interval_sec;
+  for (int tick = 0; tick < 160; ++tick) {
+    const auto output = harness.step(0.025);
+    CHECK(output.phase == phase);
+    CHECK(output.actuation == Actuation::HOLD_PITCH_YAW);
+    CHECK(near(output.pitch_rad, held.pitch_rad));
+    CHECK(near(output.yaw_rad, held.yaw_rad));
+    CHECK(near(output.zipper_motor_velocity_rad_s, 0.0));
+    if (output.dock_command == DockCommand::NONE) {
+      CHECK(harness.input.now_sec < earliest + 1e-9);
+      continue;
+    }
+    CHECK(output.dock_command == command);
+    CHECK(harness.input.now_sec + 1e-9 >= earliest);
+    last_command_sec = harness.input.now_sec;
+    // The next control tick must not retransmit the last command.
+    CHECK(harness.step(0.0).dock_command == DockCommand::NONE);
+    return output;
+  }
+  CHECK(false);
+  return Controller::Output{};
+}
+
+Controller::Output acknowledgeAfterSettle(Harness& harness, double settle_sec) {
+  auto output = harness.step(settle_sec + 0.001);
+  CHECK(output.dock_command == DockCommand::NONE);
+  ++harness.input.dock_state_sequence;
+  return harness.step(0.01);
+}
+
+void testProductionDockCommandDwell() {
+  Harness harness(Controller::Config{}, true);
+  CHECK(near(harness.config.dock_command_interval_sec, 2.0));
+  CHECK(near(harness.config.dock_deactivate_settle_sec, 2.0));
+  CHECK(near(harness.config.dock_activate_settle_sec, 2.0));
+  CHECK(near(harness.config.dock_open_settle_sec, 1.0));
+  CHECK(near(harness.config.latch_close_settle_sec, 1.0));
+  auto output = harness.prepare();
+  CHECK(output.dock_command == DockCommand::ACTIVATE);
+  const double activated_sec = harness.input.now_sec;
+  output = harness.activateToOpen();
+  CHECK(harness.input.now_sec - activated_sec >= 2.0);
+  const double opened_sec = harness.input.now_sec;
+  CHECK(harness.openToInsert().phase == Phase::INSERT);
+  harness.input.dock_detected = true;
+  output = harness.step(0.01);
+  CHECK(output.phase == Phase::LATCH_DEACTIVATE);
+  CHECK(output.dock_command == DockCommand::NONE);
+  double last_command_sec = opened_sec;
+  output = waitForSpacedCommand(harness, Phase::LATCH_DEACTIVATE,
+                               DockCommand::IDLE, output, last_command_sec);
+  const double deactivated_sec = last_command_sec;
+  output = harness.latchDeactivateToActivate();
+  CHECK(harness.input.now_sec - deactivated_sec >= 2.0);
+  const double reactivated_sec = harness.input.now_sec;
+  output = harness.latchActivateToClose();
+  CHECK(harness.input.now_sec - reactivated_sec >= 2.0);
+  CHECK(harness.closeToComplete().phase == Phase::COMPLETE);
+}
+
+void testContactSupersedesQueuedOpenAndSpacesLatchCommands() {
+  auto config = fastFixtureConfig();
+  config.dock_command_interval_sec = 2.0;
+  Harness harness(config, true);
+  const auto handoff = harness.prepare();
+  CHECK(handoff.dock_command == DockCommand::ACTIVATE);
+  double last_command_sec = harness.input.now_sec;
+  harness.input.dock_idle = false;
+  harness.input.dock_active = harness.input.dock_relay_active = true;
+  auto output = acknowledgeAfterSettle(harness, config.dock_activate_settle_sec);
+  CHECK(output.phase == Phase::DOCK_OPEN && output.dock_command == DockCommand::NONE);
+  // Contact arrives while OPEN is queued. It must cancel OPEN immediately,
+  // freeze the measured joints, and delay only the replacement IDLE command.
+  harness.input.dock_detected = true;
+  harness.input.pitch_rad += 0.02;
+  harness.input.yaw_rad += 0.01;
+  const auto contact = harness.step(0.01);
+  checkDockHold(contact, Phase::LATCH_DEACTIVATE, contact);
+  CHECK(near(contact.pitch_rad, harness.input.pitch_rad));
+  CHECK(near(contact.yaw_rad, harness.input.yaw_rad));
+  harness.idleDock();
+  output = waitForSpacedCommand(harness, Phase::LATCH_DEACTIVATE,
+                               DockCommand::IDLE, contact, last_command_sec);
+  output = acknowledgeAfterSettle(harness, config.dock_deactivate_settle_sec);
+  checkDockHold(output, Phase::LATCH_ACTIVATE, contact);
+  output = waitForSpacedCommand(harness, Phase::LATCH_ACTIVATE,
+                               DockCommand::ACTIVATE, contact, last_command_sec);
+  harness.input.dock_idle = false;
+  harness.input.dock_active = harness.input.dock_relay_active = true;
+  harness.input.dock_latch_pulse_width_us = config.latch_closed_pulse_width_us;
+  output = acknowledgeAfterSettle(harness, config.dock_activate_settle_sec);
+  checkDockHold(output, Phase::WAIT_FOR_LATCH, contact);
+  output = waitForSpacedCommand(harness, Phase::WAIT_FOR_LATCH,
+                               DockCommand::CLOSE_LATCH, contact, last_command_sec);
+  // Failed closing uses the same paced power cycle with its own retry count.
+  harness.input.dock_latch_pulse_width_us = 1500;
+  output = harness.step(config.latch_timeout_sec + 0.001);
+  checkDockHold(output, Phase::LATCH_RECOVER, contact);
+  ++harness.input.dock_state_sequence;
+  output = harness.step(0.01);
+  checkDockHold(output, Phase::LATCH_DEACTIVATE, contact, DockCommand::IDLE);
+  CHECK(output.latch_retry_attempt == 1);
+  CHECK(harness.input.now_sec - last_command_sec >= config.dock_command_interval_sec);
+  last_command_sec = harness.input.now_sec;
+  harness.idleDock();
+  output = acknowledgeAfterSettle(harness, config.dock_deactivate_settle_sec);
+  checkDockHold(output, Phase::LATCH_ACTIVATE, contact);
+  output = waitForSpacedCommand(harness, Phase::LATCH_ACTIVATE,
+                               DockCommand::ACTIVATE, contact, last_command_sec);
+  CHECK(output.latch_retry_attempt == 1);
+  harness.input.dock_idle = false;
+  harness.input.dock_active = harness.input.dock_relay_active = true;
+  harness.input.dock_latch_pulse_width_us = config.latch_closed_pulse_width_us;
+  output = acknowledgeAfterSettle(harness, config.dock_activate_settle_sec);
+  checkDockHold(output, Phase::WAIT_FOR_LATCH, contact);
+  waitForSpacedCommand(harness, Phase::WAIT_FOR_LATCH,
+                       DockCommand::CLOSE_LATCH, contact, last_command_sec);
+  // Button release cannot turn the delayed CLOSE into insertion/open.
+  harness.input.dock_detected = false;
+  CHECK(harness.closeToComplete().phase == Phase::COMPLETE);
+}
+
+void testQueuedDockPreparationStartsTimeoutAtEmission() {
+  for (bool acknowledge_open : {false, true}) {
+    auto config = fastFixtureConfig();
+    config.dock_command_interval_sec = 2.0;
+    config.dock_activate_settle_sec = config.dock_open_settle_sec =
+        config.dock_deactivate_settle_sec = 0.1;
+    config.dock_prepare_timeout_sec = 0.6;
+    Harness harness(config, true);
+    const auto handoff = harness.prepare();
+    double last_command_sec = harness.input.now_sec;
+    harness.input.dock_idle = false;
+    harness.input.dock_active = harness.input.dock_relay_active = true;
+    auto output = acknowledgeAfterSettle(harness, config.dock_activate_settle_sec);
+    checkDockHold(output, Phase::DOCK_OPEN, handoff);
+    // Longer than the operation timeout, but OPEN has not been sent yet.
+    output = harness.step(1.0);
+    checkDockHold(output, Phase::DOCK_OPEN, handoff);
+    output = waitForSpacedCommand(harness, Phase::DOCK_OPEN,
+                                 DockCommand::OPEN_LATCH, handoff, last_command_sec);
+    if (acknowledge_open) {
+      harness.input.dock_latch_open = true;
+      output = acknowledgeAfterSettle(harness, config.dock_open_settle_sec);
+      CHECK(output.phase == Phase::INSERT);
+      CHECK(output.dock_command == DockCommand::NONE);
+    } else {
+      harness.input.dock_fresh = false;
+      output = harness.step(0.59);
+      checkDockHold(output, Phase::DOCK_OPEN, handoff);
+      CHECK(harness.step(0.02).phase == Phase::DOCK_RECOVER);
+    }
+  }
+}
+
+void testDockRetryCommandsRespectSpacing() {
+  auto config = fastFixtureConfig();
+  config.dock_command_interval_sec = 2.0;
+  Harness harness(config, true);
+  const auto held = harness.prepare();
+  double last_command_sec = harness.input.now_sec;
+  harness.input.dock_idle = false;
+  harness.input.dock_active = harness.input.dock_relay_active = true;
+  CHECK(acknowledgeAfterSettle(harness, config.dock_activate_settle_sec).dock_command ==
+        DockCommand::NONE);
+  waitForSpacedCommand(harness, Phase::DOCK_OPEN, DockCommand::OPEN_LATCH,
+                      held, last_command_sec);
+  CHECK(harness.openToInsert().phase == Phase::INSERT);
+  harness.input.dock_latch_open = false;
+  CHECK(harness.step(0.01).phase == Phase::DOCK_RECOVER);
+  harness.idleDock();
+  ++harness.input.dock_state_sequence;
+  auto output = harness.step(0.01);
+  CHECK(output.phase == Phase::DOCK_DEACTIVATE && output.dock_command == DockCommand::NONE);
+  CHECK(output.dock_retry_attempt == 1);
+  output = waitForSpacedCommand(harness, Phase::DOCK_DEACTIVATE,
+                               DockCommand::IDLE, held, last_command_sec);
+  CHECK(output.dock_retry_attempt == 1);  // Waiting never spends another retry.
+  output = acknowledgeAfterSettle(harness, config.dock_deactivate_settle_sec);
+  CHECK(output.phase == Phase::DOCK_ACTIVATE && output.dock_command == DockCommand::NONE);
+  output = waitForSpacedCommand(harness, Phase::DOCK_ACTIVATE,
+                               DockCommand::ACTIVATE, held, last_command_sec);
+  CHECK(output.dock_retry_attempt == 1);
+}
+
+void testDockCommandIntervalValidation() {
+  for (double invalid : {-0.01, std::numeric_limits<double>::quiet_NaN(),
+                         std::numeric_limits<double>::infinity()}) {
+    auto config = fastFixtureConfig();
+    config.dock_command_interval_sec = invalid;
+    Harness harness(config, true);
+    const auto output = harness.step();
+    CHECK(output.phase == Phase::FAILED && output.actuation == Actuation::STOP);
+    CHECK(output.dock_command == DockCommand::NONE);
+  }
 }
 
 void testDockInsertionHeartbeatRecovery() {
@@ -1815,7 +2033,7 @@ void testYawTimeoutMotionReporting() {
     CHECK(output.adjusting && !output.step_timed_out);
     CHECK(near(output.step_rad, sign * harness.config.step_rad));
     CHECK(near(output.step_motion_rad, sign * 0.2 * kDeg));
-    output = harness.step(0.31, false);
+    output = harness.step(harness.config.adjustment_timeout_sec - 0.2 + 0.01, false);
     CHECK(!output.adjusting && output.waiting_for_capture && output.step_timed_out);
     CHECK(near(output.yaw_rad, harness.input.yaw_rad));
     CHECK(near(output.step_rad, sign * harness.config.step_rad));
@@ -1833,7 +2051,7 @@ void testYawStepsObservationAndDirection() {
   YawHarness harness;
   auto output = harness.step();
   CHECK(output.adjusting && !output.failed);
-  CHECK(near(output.yaw_rad, 0.5 * kDeg));
+  CHECK(near(output.yaw_rad, harness.config.step_rad));
   const double fixedTarget = output.yaw_rad;
   harness.input.requested_yaw_rad = 3.0 * kDeg;
   output = harness.step(0.1);
@@ -1852,13 +2070,13 @@ void testYawStepsObservationAndDirection() {
   CHECK(!output.adjusting);  // Old positive core target contradicts this capture.
   harness.input.requested_yaw_rad = -3.0 * kDeg;
   output = harness.step();
-  CHECK(output.adjusting && near(output.yaw_rad, -0.5 * kDeg));
+  CHECK(output.adjusting && near(output.yaw_rad, -harness.config.step_rad));
 
-  // Repeated larger requests do not restart the half-second step deadline.
+  // Repeated larger requests do not restart the two-second step deadline.
   YawHarness timeout;
   timeout.step();
   timeout.input.requested_yaw_rad = 10.0 * kDeg;
-  CHECK(timeout.step(0.49, false).adjusting);
+  CHECK(timeout.step(timeout.config.adjustment_timeout_sec - 0.01, false).adjusting);
   output = timeout.step(0.02, false);
   CHECK(!output.adjusting && output.waiting_for_capture);
   CHECK(output.step_timed_out);
@@ -1873,7 +2091,7 @@ void testYawStepsObservationAndDirection() {
   CHECK(timeout.step(0.01, false).waiting_for_capture);
   timeout.input.pose_stamp_ns = timeout.input.camera_now_ns;
   output = timeout.step(0.01, false);
-  CHECK(output.adjusting && near(output.yaw_rad, 0.5 * kDeg));
+  CHECK(output.adjusting && near(output.yaw_rad, timeout.config.step_rad));
   CHECK(!output.step_timed_out && near(output.step_motion_rad, 0.0));
 
   // A new post-stop capture alone cannot skip the observation pause.
@@ -1890,11 +2108,11 @@ void testYawStepsObservationAndDirection() {
   // Crossing the target freezes actual yaw rather than pulling backward.
   YawHarness overshoot;
   overshoot.step();
-  overshoot.input.yaw_rad = 0.8 * kDeg;
+  overshoot.input.yaw_rad = 1.167 * kDeg;
   output = overshoot.step();
   CHECK(!output.adjusting && output.waiting_for_capture);
   CHECK(!output.step_timed_out);
-  CHECK(near(output.yaw_rad, 0.8 * kDeg));
+  CHECK(near(output.yaw_rad, 1.167 * kDeg));
 
   // Centered camera error cancels motion and discards queued core corrections.
   YawHarness centered;
@@ -1914,6 +2132,7 @@ void testYawCancellationBoundsAndValidation() {
   YawHarness canceled;
   canceled.step();
   canceled.input.yaw_rad = 0.2 * kDeg;
+  canceled.input.allow_new_target = false;
   canceled.input.allow_alignment = false;
   auto output = canceled.step();
   CHECK(!output.adjusting && output.waiting_for_capture);
@@ -1922,15 +2141,16 @@ void testYawCancellationBoundsAndValidation() {
   output = canceled.step(1.0);
   CHECK(output.waiting_for_capture && near(output.yaw_rad, canceled.input.yaw_rad));
   canceled.input.allow_alignment = true;
+  canceled.input.allow_new_target = true;
   output = canceled.step();
   CHECK(output.adjusting);  // Disabled ticks did not restart the pause.
-  CHECK(near(output.yaw_rad, canceled.input.yaw_rad + 0.5 * kDeg));
+  CHECK(near(output.yaw_rad, canceled.input.yaw_rad + canceled.config.step_rad));
 
   YawController::Config boundedConfig;
   boundedConfig.yaw_limit_from_start_rad = 1.0 * kDeg;
   const double initialYaw = 0.4;
   YawHarness bounded(boundedConfig, initialYaw);
-  bounded.input.yaw_rad = initialYaw + 0.8 * kDeg;
+  bounded.input.yaw_rad = initialYaw + 0.7 * kDeg;
   bounded.input.allow_alignment = false;
   bounded.step();  // Refresh a released hold without changing its original bounds.
   bounded.input.allow_alignment = true;
@@ -1938,7 +2158,7 @@ void testYawCancellationBoundsAndValidation() {
   output = bounded.step();
   CHECK(output.adjusting && near(output.yaw_rad, initialYaw + 1.0 * kDeg));
   CHECK(output.yaw_rad - bounded.input.yaw_rad <= bounded.config.step_rad + 1e-9);
-  CHECK(near(output.step_rad, 0.2 * kDeg));
+  CHECK(near(output.step_rad, 0.3 * kDeg));
   bounded.input.yaw_rad = initialYaw + 1.1 * kDeg;
   CHECK(bounded.step().failed);  // An outside-bound clamp must not enlarge a step.
 
@@ -1947,7 +2167,7 @@ void testYawCancellationBoundsAndValidation() {
   YawHarness reverse(reverseConfig);
   reverse.input.requested_yaw_rad = -2.0 * kDeg;
   output = reverse.step();
-  CHECK(output.adjusting && near(output.yaw_rad, -0.5 * kDeg));
+  CHECK(output.adjusting && near(output.yaw_rad, -reverse.config.step_rad));
 
   // A released/idle motor must not resume a strong hold at an old target.
   YawHarness idle;
@@ -1956,7 +2176,7 @@ void testYawCancellationBoundsAndValidation() {
   output = idle.step();
   CHECK(!output.adjusting && near(output.yaw_rad, idle.input.yaw_rad));
   idle.input.allow_alignment = true;
-  idle.input.yaw_rad = 2.0 * kDeg;
+  idle.input.yaw_rad = 2.3 * kDeg;
   output = idle.step();
   CHECK(!output.adjusting && output.waiting_for_capture);
   CHECK(near(output.yaw_rad, idle.input.yaw_rad));
@@ -1968,6 +2188,105 @@ void testYawCancellationBoundsAndValidation() {
   badConfig.step_rad = 0.0;
   YawHarness invalid(badConfig);
   CHECK(invalid.step().failed);
+}
+
+void testYawCaptureWaitPreservesPositionTargetAndDeadline() {
+  // A pitch/extension capture wait blocks the next nudge, rather than
+  // replacing an unfinished position target with each measured angle.
+  const double initialYaw = 510.4 * kDeg;
+  for (double sign : {-1.0, 1.0}) {
+    YawHarness harness(YawController::Config{}, initialYaw);
+    harness.input.camera_x_error_m = sign * 0.1;
+    harness.input.requested_yaw_rad = initialYaw + sign * 2.0 * kDeg;
+    auto output = harness.step();
+    CHECK(output.adjusting);
+    const double fixedTarget = output.yaw_rad;
+    const double startTime = harness.input.now_sec;
+    harness.input.allow_new_target = false;
+
+    for (int tick = 0; tick < 4; ++tick) {
+      harness.input.yaw_rad = initialYaw + sign * tick * 0.167 * kDeg;
+      harness.input.requested_yaw_rad = initialYaw + sign * (tick + 10.0) * kDeg;
+      output = harness.step(0.4, false);
+      CHECK(output.adjusting && !output.step_timed_out && !output.failed);
+      CHECK(near(output.yaw_rad, fixedTarget));
+      CHECK(near(output.step_rad, sign * 1.0 * kDeg));
+      CHECK(near(output.step_motion_rad, harness.input.yaw_rad - initialYaw));
+    }
+
+    // Blocking new targets cannot extend the deadline of the current target.
+    const double remaining = harness.config.adjustment_timeout_sec -
+        (harness.input.now_sec - startTime);
+    output = harness.step(remaining + 0.01, false);
+    CHECK(!output.adjusting && output.step_timed_out && output.waiting_for_capture);
+    CHECK(near(output.yaw_rad, harness.input.yaw_rad));
+    CHECK(near(output.step_rad, sign * 1.0 * kDeg));
+    CHECK(near(output.step_motion_rad, sign * 0.501 * kDeg));
+
+    // A new camera capture and an elapsed pause cannot start another target
+    // while the main docking controller still requires a capture wait.
+    output = harness.step(harness.config.observation_pause_sec + 0.01);
+    CHECK(!output.adjusting && !output.step_timed_out && output.waiting_for_capture);
+    harness.input.allow_new_target = true;
+    output = harness.step(0.01, false);
+    CHECK(output.adjusting && !output.waiting_for_capture);
+    CHECK(near(output.yaw_rad, harness.input.yaw_rad + sign * harness.config.step_rad));
+  }
+}
+
+void testYawQuantizedFeedbackAndBlockedObservation() {
+  // A 1-degree step remains distinguishable with roughly 0.167-degree motor
+  // feedback increments; progress is held until within the 0.2-degree band.
+  for (double sign : {-1.0, 1.0}) {
+    YawHarness harness;
+    harness.input.camera_x_error_m = sign * 0.05;
+    harness.input.requested_yaw_rad = sign * 2.0 * kDeg;
+    auto output = harness.step();
+    CHECK(output.adjusting && near(output.yaw_rad, sign * 1.0 * kDeg));
+    const double fixedTarget = output.yaw_rad;
+    harness.input.allow_new_target = false;
+    for (int tick = 1; tick <= 4; ++tick) {
+      harness.input.yaw_rad = sign * tick * 0.167 * kDeg;
+      output = harness.step(0.1);
+      CHECK(output.adjusting && !output.step_timed_out);
+      CHECK(near(output.yaw_rad, fixedTarget));
+    }
+    harness.input.yaw_rad = sign * 0.835 * kDeg;
+    output = harness.step(0.1);
+    CHECK(!output.adjusting && !output.step_timed_out && output.waiting_for_capture);
+    CHECK(near(output.yaw_rad, harness.input.yaw_rad));
+    CHECK(near(output.step_motion_rad, sign * 0.835 * kDeg));
+    const double settledHold = output.yaw_rad;
+    const auto stopStamp = harness.input.camera_now_ns;
+
+    // Even after the pause, a camera capture from the stop instant is too old.
+    output = harness.step(harness.config.observation_pause_sec + 0.01, false);
+    CHECK(!output.adjusting && output.waiting_for_capture);
+    harness.input.allow_new_target = true;
+    harness.input.pose_stamp_ns = stopStamp;
+    CHECK(harness.step(0.01, false).waiting_for_capture);
+
+    // A later capture remains blocked until the docking controller permits a
+    // new target. Small measured drift does not refresh the settled hold.
+    harness.input.allow_new_target = false;
+    harness.input.yaw_rad += sign * 0.167 * kDeg;
+    output = harness.step(0.01);
+    CHECK(!output.adjusting && output.waiting_for_capture);
+    CHECK(near(output.yaw_rad, settledHold));
+    harness.input.allow_new_target = true;
+    output = harness.step(0.01, false);
+    CHECK(output.adjusting && !output.waiting_for_capture);
+    CHECK(near(output.yaw_rad, harness.input.yaw_rad + sign * harness.config.step_rad));
+  }
+
+  // Blocking a new target at startup leaves the initial hold unchanged.
+  YawHarness initiallyBlocked;
+  initiallyBlocked.input.allow_new_target = false;
+  auto output = initiallyBlocked.step(1.0);
+  CHECK(!output.adjusting && !output.waiting_for_capture);
+  CHECK(near(output.yaw_rad, 0.0));
+  initiallyBlocked.input.allow_new_target = true;
+  CHECK(initiallyBlocked.step().adjusting);
 }
 
 }  // namespace
@@ -1984,6 +2303,11 @@ int main() {
     testDockPreparationFreshnessAndTimeout();
     testDockPreparationContactPriority();
     testDockPreparationTimingValidation();
+    testProductionDockCommandDwell();
+    testContactSupersedesQueuedOpenAndSpacesLatchCommands();
+    testQueuedDockPreparationStartsTimeoutAtEmission();
+    testDockRetryCommandsRespectSpacing();
+    testDockCommandIntervalValidation();
     testDockInsertionHeartbeatRecovery();
     testDockInsertionNotReadyRecovery();
     testDockDeactivationAcknowledgement();
@@ -2008,6 +2332,8 @@ int main() {
     testYawTimeoutMotionReporting();
     testYawStepsObservationAndDirection();
     testYawCancellationBoundsAndValidation();
+    testYawCaptureWaitPreservesPositionTargetAndDeadline();
+    testYawQuantizedFeedbackAndBlockedObservation();
     std::cout << "All autonomous docking controller tests passed\n";
     return 0;
   } catch (const std::exception& error) {

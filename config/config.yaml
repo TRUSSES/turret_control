@@ -83,11 +83,16 @@ docking:
   max_pitch_step_deg: 2.0
   # Each correction requests this full step from measured yaw, even if the
   # camera-guided request is initially smaller than the completion deadband.
-  max_yaw_step_deg: 0.5
+  # One degree is about six feedback increments with the configured MIT range.
+  max_yaw_step_deg: 1.0
+  # Holding gains also apply to insertion and undocking; correction gains apply
+  # only while reaching one bounded yaw position step (commanded velocity = 0).
   yaw_position_kp: 160.0
   yaw_position_kd: 2.0
-  yaw_target_deadband_deg: 0.15
-  yaw_adjustment_timeout_sec: 0.5
+  yaw_correction_kp: 250.0
+  yaw_correction_kd: 1.0
+  yaw_target_deadband_deg: 0.2
+  yaw_adjustment_timeout_sec: 2.0
   # Require a capture taken after the previous correction before another step.
   yaw_observation_pause_sec: 0.2
   yaw_feedback_timeout_sec: 0.25
@@ -100,9 +105,12 @@ docking:
   search_pitch_rate_deg_s: 5.0
   # Send ACTIVATE and then OPEN_LATCH at the camera handoff, not during approach.
   # Wait for new state feedback after each operation's minimum settling time.
-  dock_activate_settle_sec: 1.0
-  dock_open_settle_sec: 0.6
-  dock_deactivate_settle_sec: 0.3
+  # Keep power switching and servo commands apart during preparation/retries.
+  # These are nonblocking stopped waits; feedback callbacks continue running.
+  dock_command_interval_sec: 2.0
+  dock_activate_settle_sec: 2.0
+  dock_open_settle_sec: 1.0
+  dock_deactivate_settle_sec: 2.0
   dock_prepare_timeout_sec: 5.0  # Per preparation/recovery wait; NOT an insertion timer.
   # Additional preparation resets; latch closing has its own budget of this size.
   # Approach resets require an unoccupied port. Contact switches permanently to
@@ -113,16 +121,17 @@ docking:
   # Zipper speeds below are motor rad/s, not extension m/s.
   insertion_velocity_rad_s: 1.2  # Insert at the measured minimum working speed.
   latch_timeout_sec: 8.0
-  latch_close_settle_sec: 0.6
+  latch_close_settle_sec: 1.0
   # Match docking node's servo1_zero_us. This confirms the commanded pulse;
   # the docking port has no sensor to confirm physical latch closure.
   latch_closed_pulse_width_us: 1000
 
 undocking:
   # Power-cycle and open the latch before any zipper retraction.
-  dock_deactivate_settle_sec: 0.3
-  dock_activate_settle_sec: 1.0
-  dock_open_settle_sec: 0.6
+  dock_command_interval_sec: 2.0
+  dock_deactivate_settle_sec: 2.0
+  dock_activate_settle_sec: 2.0
+  dock_open_settle_sec: 1.0
   dock_prepare_timeout_sec: 5.0
   dock_retry_attempts: 4  # Additional cycles; independent of docking retries.
   # First retract this measured distance with the docking pitch held.

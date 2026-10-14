@@ -23,6 +23,22 @@ bool near(double left, double right, double tolerance = 1e-9) {
   return std::fabs(left - right) <= tolerance;
 }
 
+Controller::Config fastFixtureConfig() {
+  Controller::Config config;
+  config.dock_command_interval_sec = 0.0;
+  config.dock_deactivate_settle_sec = 0.3;
+  config.dock_activate_settle_sec = 1.0;
+  config.dock_open_settle_sec = 0.6;
+  return config;
+}
+
+Controller::Config fixtureConfig(Controller::Config settings, bool use_command_delay) {
+  // Historical state-machine scenarios keep their fast command fixture. The
+  // spacing scenarios explicitly preserve the production/custom interval.
+  if (!use_command_delay) settings.dock_command_interval_sec = 0.0;
+  return settings;
+}
+
 struct Harness {
   Controller::Config config;
   Controller controller;
@@ -30,8 +46,9 @@ struct Harness {
   double initial_pitch = 55.0 * kDeg;
   double initial_yaw = 0.2;
 
-  explicit Harness(Controller::Config settings = Controller::Config{}, double extension = 0.60)
-      : config(settings), controller(settings) {
+  explicit Harness(Controller::Config settings = fastFixtureConfig(), double extension = 0.60,
+                   bool use_command_delay = false)
+      : config(fixtureConfig(settings, use_command_delay)), controller(config) {
     input.extension_m = extension;
     input.pitch_rad = initial_pitch;
     input.yaw_rad = initial_yaw;
@@ -123,6 +140,142 @@ void checkHold(const Controller::Output& output, double pitch, double yaw) {
   CHECK(near(output.pitch_rad, pitch));
   CHECK(near(output.yaw_rad, yaw));
   CHECK(near(output.zipper_motor_velocity_rad_s, 0.0));
+}
+
+Controller::Output waitForSpacedCommand(Harness& harness, Phase phase,
+                                      DockCommand command, double pitch,
+                                      double& last_command_sec) {
+  const double earliest = last_command_sec + harness.config.dock_command_interval_sec;
+  for (int tick = 0; tick < 160; ++tick) {
+    const auto output = harness.step(0.025);
+    CHECK(output.phase == phase);
+    checkHold(output, pitch, harness.initial_yaw);
+    if (output.dock_command == DockCommand::NONE) {
+      CHECK(harness.input.now_sec < earliest + 1e-9);
+      continue;
+    }
+    CHECK(output.dock_command == command);
+    CHECK(harness.input.now_sec + 1e-9 >= earliest);
+    last_command_sec = harness.input.now_sec;
+    CHECK(harness.step(0.0).dock_command == DockCommand::NONE);
+    return output;
+  }
+  CHECK(false);
+  return Controller::Output{};
+}
+
+Controller::Output acknowledgeAfterSettle(Harness& harness, double settle_sec) {
+  auto output = harness.step(settle_sec + 0.001);
+  CHECK(output.dock_command == DockCommand::NONE);
+  return harness.step(0.01, true);
+}
+
+void testProductionCommandDwellBeforeUndocking() {
+  Harness harness(Controller::Config{}, 0.60, true);
+  CHECK(near(harness.config.dock_command_interval_sec, 2.0));
+  CHECK(near(harness.config.dock_deactivate_settle_sec, 2.0));
+  CHECK(near(harness.config.dock_activate_settle_sec, 2.0));
+  CHECK(near(harness.config.dock_open_settle_sec, 1.0));
+  harness.begin();
+  const double deactivated_sec = harness.input.now_sec;
+  harness.deactivateToActivate();
+  CHECK(harness.input.now_sec - deactivated_sec >= 2.0);
+  const double activated_sec = harness.input.now_sec;
+  harness.activateToOpen();
+  CHECK(harness.input.now_sec - activated_sec >= 2.0);
+  const auto output = harness.openToMotion();
+  CHECK(output.phase == Phase::SLOW_RETRACT);
+  CHECK(near(output.zipper_motor_velocity_rad_s, -1.2));
+}
+
+void testUndockingCommandsAndRetryStaySpaced() {
+  auto config = fastFixtureConfig();
+  config.dock_command_interval_sec = 2.0;
+  Harness harness(config, 0.60, true);
+  harness.begin();
+  double last_command_sec = harness.input.now_sec;
+  harness.idlePort();
+  auto output = acknowledgeAfterSettle(harness, config.dock_deactivate_settle_sec);
+  CHECK(output.phase == Phase::DOCK_ACTIVATE && output.dock_command == DockCommand::NONE);
+  waitForSpacedCommand(harness, Phase::DOCK_ACTIVATE, DockCommand::ACTIVATE,
+                      harness.initial_pitch, last_command_sec);
+  harness.input.dock_idle = false;
+  harness.input.dock_active = harness.input.dock_relay_active = true;
+  output = acknowledgeAfterSettle(harness, config.dock_activate_settle_sec);
+  CHECK(output.phase == Phase::DOCK_OPEN && output.dock_command == DockCommand::NONE);
+  waitForSpacedCommand(harness, Phase::DOCK_OPEN, DockCommand::OPEN_LATCH,
+                      harness.initial_pitch, last_command_sec);
+  CHECK(harness.openToMotion().phase == Phase::SLOW_RETRACT);
+  harness.input.extension_m = 0.46;
+  harness.input.dock_latch_open = false;
+  CHECK(harness.step(0.01).phase == Phase::DOCK_RECOVER);
+  output = harness.step(0.01, true);
+  CHECK(output.phase == Phase::DOCK_DEACTIVATE && output.dock_command == DockCommand::NONE);
+  CHECK(output.dock_retry_attempt == 1);
+
+  // A residual encoder movement may reach 15 cm while IDLE is delayed. The
+  // measured pitch from that crossing must survive the entire queued retry.
+  harness.input.extension_m = 0.45;
+  harness.input.pitch_rad = 58.0 * kDeg;
+  output = harness.step(0.01);
+  CHECK(output.phase == Phase::DOCK_DEACTIVATE && output.dock_command == DockCommand::NONE);
+  checkHold(output, 58.0 * kDeg, harness.initial_yaw);
+  harness.input.pitch_rad = 59.0 * kDeg;
+  output = waitForSpacedCommand(harness, Phase::DOCK_DEACTIVATE, DockCommand::IDLE,
+                               58.0 * kDeg, last_command_sec);
+  CHECK(output.dock_retry_attempt == 1);
+  harness.idlePort();
+  output = acknowledgeAfterSettle(harness, config.dock_deactivate_settle_sec);
+  CHECK(output.phase == Phase::DOCK_ACTIVATE && output.dock_command == DockCommand::NONE);
+  waitForSpacedCommand(harness, Phase::DOCK_ACTIVATE, DockCommand::ACTIVATE,
+                      58.0 * kDeg, last_command_sec);
+  harness.input.dock_idle = false;
+  harness.input.dock_active = harness.input.dock_relay_active = true;
+  output = acknowledgeAfterSettle(harness, config.dock_activate_settle_sec);
+  CHECK(output.phase == Phase::DOCK_OPEN && output.dock_command == DockCommand::NONE);
+  waitForSpacedCommand(harness, Phase::DOCK_OPEN, DockCommand::OPEN_LATCH,
+                      58.0 * kDeg, last_command_sec);
+  output = harness.openToMotion();
+  CHECK(output.phase == Phase::FAST_RETRACT);
+  CHECK(near(output.pitch_rad, 58.0 * kDeg));
+  CHECK(near(output.zipper_motor_velocity_rad_s, -1.8));
+  CHECK(output.dock_retry_attempt == 1);
+}
+
+void testQueuedUndockingStartsTimeoutAtEmission() {
+  auto config = fastFixtureConfig();
+  config.dock_command_interval_sec = 2.0;
+  config.dock_activate_settle_sec = config.dock_open_settle_sec =
+      config.dock_deactivate_settle_sec = 0.1;
+  config.dock_prepare_timeout_sec = 0.6;
+  Harness harness(config, 0.60, true);
+  harness.begin();
+  double last_command_sec = harness.input.now_sec;
+  harness.idlePort();
+  auto output = acknowledgeAfterSettle(harness, config.dock_deactivate_settle_sec);
+  CHECK(output.phase == Phase::DOCK_ACTIVATE && output.dock_command == DockCommand::NONE);
+  harness.input.dock_fresh = false;
+  // Waiting for the command interval consumes none of its operation timeout.
+  output = harness.step(1.0);
+  CHECK(output.phase == Phase::DOCK_ACTIVATE && output.dock_command == DockCommand::NONE);
+  checkHold(output, harness.initial_pitch, harness.initial_yaw);
+  waitForSpacedCommand(harness, Phase::DOCK_ACTIVATE, DockCommand::ACTIVATE,
+                      harness.initial_pitch, last_command_sec);
+  output = harness.step(0.59);
+  CHECK(output.phase == Phase::DOCK_ACTIVATE && output.dock_command == DockCommand::NONE);
+  CHECK(harness.step(0.02).phase == Phase::DOCK_RECOVER);
+}
+
+void testUndockingCommandIntervalValidation() {
+  for (double invalid : {-0.01, std::numeric_limits<double>::quiet_NaN(),
+                         std::numeric_limits<double>::infinity()}) {
+    auto config = fastFixtureConfig();
+    config.dock_command_interval_sec = invalid;
+    Harness harness(config, 0.60, true);
+    const auto output = harness.step();
+    CHECK(output.phase == Phase::FAILED && output.actuation == Actuation::STOP);
+    CHECK(output.dock_command == DockCommand::NONE);
+  }
 }
 
 void testCommandOrderAndHeldButton() {
@@ -578,6 +731,10 @@ void testValidationAndNoApproachExtensionLimit() {
 
 int main() {
   try {
+    testProductionCommandDwellBeforeUndocking();
+    testUndockingCommandsAndRetryStaySpaced();
+    testQueuedUndockingStartsTimeoutAtEmission();
+    testUndockingCommandIntervalValidation();
     testCommandOrderAndHeldButton();
     testMeasuredClearanceAndFinalPose();
     testShortStartingExtensionNeverExtendsOrOverRetracts();

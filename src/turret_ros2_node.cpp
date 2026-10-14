@@ -305,6 +305,8 @@ private:
     std::string docking_yaw_status_;
     double docking_yaw_position_kp_ = 160.0;
     double docking_yaw_position_kd_ = 2.0;
+    double docking_yaw_correction_kp_ = 250.0;
+    double docking_yaw_correction_kd_ = 1.0;
     double docking_yaw_feedback_timeout_sec_ = 0.25;
     double docking_goal_camera_x_m_ = 0.0;
     DockingController::Output docking_output_{};
@@ -389,11 +391,13 @@ private:
         declare_double("pitch_motor_velocity_limit_rad_s", 0.35);
         declare_double("max_yaw_rate_deg_s", 5.0);
         declare_double("max_pitch_step_deg", 2.0);
-        declare_double("max_yaw_step_deg", 0.5);
+        declare_double("max_yaw_step_deg", 1.0);
         declare_double("yaw_position_kp", 160.0);
         declare_double("yaw_position_kd", 2.0);
-        declare_double("yaw_target_deadband_deg", 0.15);
-        declare_double("yaw_adjustment_timeout_sec", 0.5);
+        declare_double("yaw_correction_kp", 250.0);
+        declare_double("yaw_correction_kd", 1.0);
+        declare_double("yaw_target_deadband_deg", 0.2);
+        declare_double("yaw_adjustment_timeout_sec", 2.0);
         declare_double("yaw_observation_pause_sec", 0.2);
         declare_double("yaw_feedback_timeout_sec", 0.25);
         declare_double("max_dt_sec", 0.1);
@@ -403,14 +407,15 @@ private:
         declare_double("search_pitch_rate_deg_s", 5.0);
         declare_double("zipper_motor_velocity_rad_s", 1.2);
         declare_double("insertion_velocity_rad_s", 1.2);
-        declare_double("dock_activate_settle_sec", 1.0);
-        declare_double("dock_open_settle_sec", 0.6);
+        declare_double("dock_activate_settle_sec", 2.0);
+        declare_double("dock_open_settle_sec", 1.0);
         declare_double("dock_prepare_timeout_sec", 5.0);
-        declare_double("dock_deactivate_settle_sec", 0.3);
+        declare_double("dock_deactivate_settle_sec", 2.0);
+        declare_double("dock_command_interval_sec", 2.0);
         this->declare_parameter("docking_dock_retry_attempts",
             docking && docking["dock_retry_attempts"] ? docking["dock_retry_attempts"].as<int>() : 4);
         declare_double("latch_timeout_sec", 8.0);
-        declare_double("latch_close_settle_sec", 0.6);
+        declare_double("latch_close_settle_sec", 1.0);
         this->declare_parameter("docking_latch_closed_pulse_width_us",
             docking && docking["latch_closed_pulse_width_us"] ? docking["latch_closed_pulse_width_us"].as<int>() : 1000);
         declare_double("pose_timeout_sec", 1.0);
@@ -476,6 +481,8 @@ private:
         docking_yaw_config_.camera_lateral_deadband_m = settings.lateral_deadband_m;
         docking_yaw_position_kp_ = get("yaw_position_kp");
         docking_yaw_position_kd_ = get("yaw_position_kd");
+        docking_yaw_correction_kp_ = get("yaw_correction_kp");
+        docking_yaw_correction_kd_ = get("yaw_correction_kd");
         docking_yaw_feedback_timeout_sec_ = get("yaw_feedback_timeout_sec");
         docking_goal_camera_x_m_ = settings.goal_camera_x_m;
         settings.max_dt_sec = get("max_dt_sec");
@@ -489,6 +496,7 @@ private:
         settings.dock_open_settle_sec = get("dock_open_settle_sec");
         settings.dock_prepare_timeout_sec = get("dock_prepare_timeout_sec");
         settings.dock_deactivate_settle_sec = get("dock_deactivate_settle_sec");
+        settings.dock_command_interval_sec = get("dock_command_interval_sec");
         const auto retry_attempts = this->get_parameter("docking_dock_retry_attempts").as_int();
         if (retry_attempts < 0 || retry_attempts > std::numeric_limits<int>::max()) {
             throw std::invalid_argument("docking_dock_retry_attempts must be a nonnegative integer");
@@ -517,6 +525,8 @@ private:
             docking_command_period_sec_ > 0.5 || docking_camera_frame_.empty() ||
             !std::isfinite(docking_yaw_position_kp_) || docking_yaw_position_kp_ <= 0.0 || docking_yaw_position_kp_ > 500.0 ||
             !std::isfinite(docking_yaw_position_kd_) || docking_yaw_position_kd_ <= 0.0 || docking_yaw_position_kd_ > 5.0 ||
+            !std::isfinite(docking_yaw_correction_kp_) || docking_yaw_correction_kp_ <= 0.0 || docking_yaw_correction_kp_ > 500.0 ||
+            !std::isfinite(docking_yaw_correction_kd_) || docking_yaw_correction_kd_ <= 0.0 || docking_yaw_correction_kd_ > 5.0 ||
             !std::isfinite(docking_yaw_feedback_timeout_sec_) || docking_yaw_feedback_timeout_sec_ <= 0.0 ||
             std::fabs(docking_camera_forward_sign_) != 1.0 ||
             std::fabs(docking_camera_vertical_sign_) != 1.0) {
@@ -542,9 +552,10 @@ private:
         declare_double("fast_velocity_rad_s", 1.8);
         declare_double("extension_tolerance_m", 0.005);
         declare_double("pitch_tolerance_deg", 2.0);
-        declare_double("dock_deactivate_settle_sec", 0.3);
-        declare_double("dock_activate_settle_sec", 1.0);
-        declare_double("dock_open_settle_sec", 0.6);
+        declare_double("dock_deactivate_settle_sec", 2.0);
+        declare_double("dock_activate_settle_sec", 2.0);
+        declare_double("dock_open_settle_sec", 1.0);
+        declare_double("dock_command_interval_sec", 2.0);
         declare_double("dock_prepare_timeout_sec", 5.0);
         this->declare_parameter("undocking_dock_retry_attempts",
             section && section["dock_retry_attempts"] ? section["dock_retry_attempts"].as<int>() : 4);
@@ -575,6 +586,7 @@ private:
         settings.dock_activate_settle_sec = get("dock_activate_settle_sec");
         settings.dock_open_settle_sec = get("dock_open_settle_sec");
         settings.dock_prepare_timeout_sec = get("dock_prepare_timeout_sec");
+        settings.dock_command_interval_sec = get("dock_command_interval_sec");
         const auto attempts = this->get_parameter("undocking_dock_retry_attempts").as_int();
         if (attempts < 0 || attempts > std::numeric_limits<int>::max()) {
             throw std::invalid_argument("undocking_dock_retry_attempts must be a nonnegative integer");
@@ -1252,7 +1264,13 @@ private:
         yaw_input.yaw_rad = input.yaw_rad;
         yaw_input.requested_yaw_rad = docking_output_.yaw_rad;
         yaw_input.camera_x_error_m = input.camera_x_m - docking_goal_camera_x_m_;
-        yaw_input.allow_alignment = docking_controller_->allowsYawAlignment(input);
+        // A post-burst camera wait blocks a new correction, but must not discard
+        // the fixed position target already being executed. Loss of tracking or
+        // leaving the visual approach still cancels that target immediately.
+        yaw_input.allow_alignment = input.pose_fresh &&
+            (docking_output_.phase == DockingController::Phase::PITCH_CENTER ||
+             docking_output_.phase == DockingController::Phase::APPROACH);
+        yaw_input.allow_new_target = docking_controller_->allowsYawAlignment(input);
         const auto yaw_output = docking_yaw_controller_->update(yaw_input);
         if (yaw_output.failed) {
             throw std::runtime_error(yaw_output.status);
@@ -1260,9 +1278,10 @@ private:
         if (yaw_output.step_timed_out) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                 "Yaw correction timed out: commanded step=%.2f deg measured motion=%.2f deg, "
-                "motor_velocity=%.3f rad/s; holding measured yaw before another camera capture",
+                "motor_velocity=%.3f rad/s feedback_torque=%.3f error_flag=%d; "
+                "holding measured yaw before another camera capture",
                 yaw_output.step_rad * 180.0 / M_PI, yaw_output.step_motion_rad * 180.0 / M_PI,
-                turret_->GetYawMotorVelocity());
+                turret_->GetYawMotorVelocity(), turret_->GetYawMotorTorque(), turret_->GetYawMotorErrorFlag());
         }
         const double yaw_target = yaw_input.allow_alignment ? yaw_output.yaw_rad : docking_output_.yaw_rad;
         if (yaw_input.allow_alignment && docking_yaw_status_ != yaw_output.status) {
@@ -1279,7 +1298,8 @@ private:
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                 "Docking feedback: tag_z=%.3f m vertical_error=%.2f deg pitch=%.2f -> %.2f deg "
                 "extension=%.3f m zipper=%s velocity=%.2f rad/s camera_x_error=%.3f m "
-                "yaw=%.2f -> %.2f deg yaw_motor_velocity=%.3f rad/s yaw_control=%s",
+                "yaw=%.2f -> %.2f deg yaw_motor_velocity=%.3f rad/s "
+                "yaw_feedback_torque=%.3f yaw_error_flag=%d yaw_control=%s",
                 input.camera_z_m, vertical_error * 180.0 / M_PI,
                 input.pitch_rad * 180.0 / M_PI, docking_output_.pitch_rad * 180.0 / M_PI,
                 input.extension_m,
@@ -1287,7 +1307,8 @@ private:
                     ? "STOPPED for centering/new camera pose" : "extending burst with pitch held",
                 docking_output_.zipper_motor_velocity_rad_s,
                 yaw_input.camera_x_error_m, input.yaw_rad * 180.0 / M_PI, yaw_target * 180.0 / M_PI,
-                turret_->GetYawMotorVelocity(), yaw_output.status.c_str());
+                turret_->GetYawMotorVelocity(), turret_->GetYawMotorTorque(),
+                turret_->GetYawMotorErrorFlag(), yaw_output.status.c_str());
         }
         if (docking_output_.actuation == DockingController::Actuation::INSERT_HOLD_PITCH) {
             turret_->ActuateDockingInsertion(docking_output_.zipper_motor_velocity_rad_s,
@@ -1310,7 +1331,10 @@ private:
         } else {
             throw std::logic_error("Unexpected autonomous docking actuation");
         }
-        turret_->HoldYawPosition(yaw_target, docking_yaw_position_kp_, docking_yaw_position_kd_);
+        const bool yaw_correction_active = yaw_input.allow_alignment && yaw_output.adjusting;
+        turret_->HoldYawPosition(yaw_target,
+            yaw_correction_active ? docking_yaw_correction_kp_ : docking_yaw_position_kp_,
+            yaw_correction_active ? docking_yaw_correction_kd_ : docking_yaw_position_kd_);
         publishDockCommand(dock_command);
     }
 
@@ -1766,8 +1790,11 @@ private:
                             settings.centering_start_tolerance_rad * 180.0 / M_PI,
                             settings.centering_stop_tolerance_rad * 180.0 / M_PI);
                         RCLCPP_INFO(this->get_logger(),
-                            "Docking yaw: reference=%.2f deg step_max=%.2f deg kp=%.1f kd=%.1f; separate yaw zero not required",
+                            "Docking yaw POSITION: reference=%.2f deg step_max=%.2f deg timeout=%.2f s "
+                            "correction_kp=%.1f correction_kd=%.1f hold_kp=%.1f hold_kd=%.1f; separate yaw zero not required",
                             initial_input.yaw_rad * 180.0 / M_PI, docking_yaw_config_.step_rad * 180.0 / M_PI,
+                            docking_yaw_config_.adjustment_timeout_sec,
+                            docking_yaw_correction_kp_, docking_yaw_correction_kd_,
                             docking_yaw_position_kp_, docking_yaw_position_kd_);
                         executeAutonomousDockingCommand();
                     } catch (const std::exception& e) {

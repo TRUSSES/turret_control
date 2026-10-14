@@ -35,10 +35,13 @@ class AutonomousUndockingController {
     double pitch_tolerance_rad = 2.0 * kRadiansPerDegree;
     double pitch_min_rad = 0.0;
     double pitch_max_rad = 63.0 * kRadiansPerDegree;
-    double dock_deactivate_settle_sec = 0.3;
-    double dock_activate_settle_sec = 1.0;
-    double dock_open_settle_sec = 0.6;
+    double dock_deactivate_settle_sec = 2.0;
+    double dock_activate_settle_sec = 2.0;
+    double dock_open_settle_sec = 1.0;
     double dock_prepare_timeout_sec = 5.0;
+    // Minimum time between port commands, including power-cycle retries.
+    // Joint holds and feedback updates continue while a command is queued.
+    double dock_command_interval_sec = 2.0;
     int dock_retry_attempts = 4;
   };
 
@@ -64,7 +67,10 @@ class AutonomousUndockingController {
     last_time_sec_ = phase_start_sec_ = 0.0;
     initial_extension_m_ = initial_pitch_rad_ = initial_yaw_rad_ = 0.0;
     slow_extension_m_ = tracked_pitch_rad_ = 0.0;
-    initial_command_pending_ = motion_started_ = pitch_tracking_started_ = false;
+    motion_started_ = pitch_tracking_started_ = false;
+    pending_dock_command_ = DockCommand::NONE;
+    last_dock_command_sec_ = 0.0;
+    have_issued_dock_command_ = false;
     waiting_for_post_settle_state_ = false;
     dock_settle_sequence_ = recovery_state_sequence_ = 0;
   }
@@ -90,7 +96,7 @@ class AutonomousUndockingController {
     enter(Phase::DOCK_DEACTIVATE, input.now_sec,
           "Undocking: deactivating dock before activating and opening latch");
     hold(input);
-    initial_command_pending_ = true;
+    pending_dock_command_ = DockCommand::IDLE;
   }
 
   Output update(const Input& input) {
@@ -105,20 +111,17 @@ class AutonomousUndockingController {
       holdFinal(input);
       return output_;
     }
-    if (initial_command_pending_) {
-      initial_command_pending_ = false;
-      // Start the wait when the first command is actually emitted.
-      phase_start_sec_ = input.now_sec;
-      hold(input);
-      output_.dock_command = DockCommand::IDLE;
-      return output_;
-    }
-
     if (motion_started_ && !pitch_tracking_started_ &&
         input.extension_m <= slow_extension_m_ + 1e-9) {
       // Capture the clearance milestone even if this update also loses port
       // feedback. Recovery must keep this reference rather than recapture it.
       captureTrackedPitch(input);
+    }
+
+    if (pending_dock_command_ != DockCommand::NONE) {
+      hold(input);
+      emitPendingDockCommand(input);
+      return output_;
     }
 
     if (phase_ == Phase::DOCK_RECOVER) {
@@ -153,7 +156,7 @@ class AutonomousUndockingController {
         waiting_for_post_settle_state_ = false;
         enter(Phase::DOCK_ACTIVATE, input.now_sec,
               retryStatus("Undocking: dock deactivated; activating servos"));
-        output_.dock_command = DockCommand::ACTIVATE;
+        scheduleDockCommand(input, DockCommand::ACTIVATE);
         return output_;
       }
       if (!input.dock_active || !input.dock_relay_active) return output_;
@@ -162,7 +165,7 @@ class AutonomousUndockingController {
         waiting_for_post_settle_state_ = false;
         enter(Phase::DOCK_OPEN, input.now_sec,
               retryStatus("Undocking: dock activated; opening latch"));
-        output_.dock_command = DockCommand::OPEN_LATCH;
+        scheduleDockCommand(input, DockCommand::OPEN_LATCH);
         return output_;
       }
       if (!input.dock_latch_open) return output_;
@@ -201,7 +204,9 @@ class AutonomousUndockingController {
   double initial_yaw_rad_ = 0.0;
   double slow_extension_m_ = 0.0;
   double tracked_pitch_rad_ = 0.0;
-  bool initial_command_pending_ = false;
+  DockCommand pending_dock_command_ = DockCommand::NONE;
+  double last_dock_command_sec_ = 0.0;
+  bool have_issued_dock_command_ = false;
   bool motion_started_ = false;
   bool pitch_tracking_started_ = false;
   bool waiting_for_post_settle_state_ = false;
@@ -217,7 +222,7 @@ class AutonomousUndockingController {
       config_.target_extension_m, config_.intermediate_extension_m,
       config_.slow_clearance_m, config_.extension_tolerance_m,
       config_.dock_deactivate_settle_sec, config_.dock_activate_settle_sec,
-      config_.dock_open_settle_sec
+      config_.dock_open_settle_sec, config_.dock_command_interval_sec
     };
     for (double value : nonnegative_values) if (!nonnegative(value)) return false;
     const double positive_values[] = {
@@ -276,8 +281,31 @@ class AutonomousUndockingController {
     output_.zipper_motor_velocity_rad_s = 0.0;
   }
 
+  void scheduleDockCommand(const Input& input, DockCommand command) {
+    pending_dock_command_ = command;
+    waiting_for_post_settle_state_ = false;
+    emitPendingDockCommand(input);
+  }
+
+  void emitPendingDockCommand(const Input& input) {
+    if (pending_dock_command_ == DockCommand::NONE ||
+        (have_issued_dock_command_ && input.now_sec - last_dock_command_sec_ <
+            config_.dock_command_interval_sec)) {
+      return;
+    }
+    output_.dock_command = pending_dock_command_;
+    pending_dock_command_ = DockCommand::NONE;
+    last_dock_command_sec_ = input.now_sec;
+    have_issued_dock_command_ = true;
+    // Delay neither consumes operation timeout nor allows old completion
+    // flags to acknowledge a command before it has been sent and settled.
+    phase_start_sec_ = input.now_sec;
+    waiting_for_post_settle_state_ = false;
+  }
+
   Output fail(const std::string& status) {
     enter(Phase::FAILED, last_time_sec_, status);
+    pending_dock_command_ = DockCommand::NONE;
     output_.dock_command = DockCommand::NONE;
     output_.actuation = Actuation::STOP;
     output_.zipper_motor_velocity_rad_s = 0.0;
@@ -380,7 +408,7 @@ class AutonomousUndockingController {
     waiting_for_post_settle_state_ = false;
     enter(Phase::DOCK_DEACTIVATE, input.now_sec,
           retryStatus("Deactivating dock before activating and opening latch again"));
-    output_.dock_command = DockCommand::IDLE;
+    scheduleDockCommand(input, DockCommand::IDLE);
     return output_;
   }
 

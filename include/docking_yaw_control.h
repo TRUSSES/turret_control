@@ -14,9 +14,9 @@ namespace turret_control {
 class DockingYawController {
  public:
   struct Config {
-    double step_rad = 0.5 * kRadiansPerDegree;
-    double target_deadband_rad = 0.15 * kRadiansPerDegree;
-    double adjustment_timeout_sec = 0.5;
+    double step_rad = 1.0 * kRadiansPerDegree;
+    double target_deadband_rad = 0.2 * kRadiansPerDegree;
+    double adjustment_timeout_sec = 2.0;
     double observation_pause_sec = 0.2;
     double yaw_limit_from_start_rad = 30.0 * kRadiansPerDegree;
     double camera_lateral_deadband_m = 0.005;
@@ -30,7 +30,11 @@ class DockingYawController {
     double yaw_rad = 0.0;
     double requested_yaw_rad = 0.0;
     double camera_x_error_m = 0.0;
+    // A true tracking/phase interruption cancels the current position step.
     bool allow_alignment = false;
+    // A post-burst capture wait prevents another step, but lets an existing
+    // bounded position target finish without being replaced by measured yaw.
+    bool allow_new_target = true;
   };
 
   struct Output {
@@ -129,6 +133,7 @@ class DockingYawController {
       }
       // Neither a newer camera request nor repeated updates may accumulate a
       // farther target or restart the deadline while this step is in progress.
+      // Waiting for a post-burst camera capture gates the next target only.
       return output_;
     }
 
@@ -137,6 +142,14 @@ class DockingYawController {
       // Do not apply high stiffness to a hold target left behind by drift or a
       // released motor. Capture the current yaw and observe before nudging.
       return finishAdjustment(input, "Measured yaw moved away from its hold; observing before another step");
+    }
+    if (!input.allow_new_target) {
+      // Preserve the settled hold and any post-correction observation gate.
+      // The next correction still needs both its pause and a new capture.
+      if (!output_.waiting_for_capture) {
+        output_.status = "Waiting for camera capture; holding yaw position";
+      }
+      return output_;
     }
     if (output_.waiting_for_capture) {
       if (input.now_sec - observation_start_sec_ < config_.observation_pause_sec ||

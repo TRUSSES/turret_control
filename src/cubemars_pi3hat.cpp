@@ -12,9 +12,13 @@ CubemarsPi3Hat::CubemarsPi3Hat(int motor_id, int can_bus, mjbots::pi3hat::Pi3Hat
 }
 
 int CubemarsPi3Hat::float_to_uint(float x, float x_min, float x_max, int bits) {
-    float span = x_max - x_min;
+    const int maximum = (1 << bits) - 1;
+    const double span = static_cast<double>(x_max) - x_min;
     x = std::clamp(x, x_min, x_max);
-    return static_cast<int>((x - x_min) * ((1 << bits) / span));
+    // Match the feedback decoder and keep endpoints inside their packed fields.
+    const double scaled = (static_cast<double>(x) - x_min) * maximum / span;
+    return static_cast<int>(std::clamp(std::round(scaled), 0.0,
+                                       static_cast<double>(maximum)));
 }
 
 float CubemarsPi3Hat::uint_to_float(int x_int, float x_min, float x_max, int bits) {

@@ -26,7 +26,8 @@ the control motors and starts the controller in `include/autonomous_docking.h`:
    angles while sending ACTIVATE to `/dockN/command`. Wait for fresh ACTIVE,
    relay-on, latch-closed feedback after the activation settling period; then
    send OPEN_LATCH and wait for fresh powered/open feedback after its settling
-   period. Commands are sent once, in order. Camera tracking is no longer
+   period. Commands are sent once, in order, at least 2 seconds apart.
+   Camera tracking is no longer
    required during preparation. Each preparation stage has a 5-second timeout;
    a timeout enters dock recovery with extension stopped.
 6. **INSERT:** hold the same pitch and yaw captured before dock preparation.
@@ -74,7 +75,8 @@ camera. Capture the docked extension, pitch, and yaw at the start.
 
 1. Hold the turret stationary and send IDLE → ACTIVATE → OPEN_LATCH. Confirm
    fresh relay-off, then ACTIVE/relay-on, then powered/open feedback after
-   each operation's settling wait. No manual latch-open command is required.
+   each operation's settling wait. Automatic port commands are at least
+   2 seconds apart. No manual latch-open command is required.
    Allow four additional power cycles if preparation fails. The contact button
    may remain pressed while the turret starts withdrawing.
 2. Retract at **1.2 rad/s** while encoder feedback holds the original docking
@@ -158,27 +160,36 @@ switch the autonomous controller to another turret's tag.
 The target dock and tag parameters are read-only after startup; other docking
 tuning changes take effect on the next DOCK request.
 
-Yaw docking corrections request one full 0.5-degree position step from the
+Yaw docking corrections request one full 1-degree position step from the
 measured yaw at the start of each correction, clamped to the relative yaw
 bounds. The camera-guided core request supplies the direction; its small
 initial magnitude no longer reduces the step to almost the completion
-deadband. `yaw_position_kp`
-defaults to 160 and `yaw_position_kd` to 2; automatic undocking uses the same
-holding gains. A target stays fixed until it is reached within
-`yaw_target_deadband_deg` (0.15 degrees) or `yaw_adjustment_timeout_sec`
-(0.5 seconds) expires. The controller then holds the measured angle, waits at
+deadband. During the correction, `yaw_correction_kp` defaults to 250 and
+`yaw_correction_kd` to 1. Position holding uses `yaw_position_kp` = 160 and
+`yaw_position_kd` = 2, including insertion and automatic undocking.
+A target stays fixed until it is reached within
+`yaw_target_deadband_deg` (0.2 degrees) or `yaw_adjustment_timeout_sec`
+(2 seconds) expires. The configured MIT position range gives approximately
+0.167 degrees per feedback increment; the 1-degree target spans about six
+increments. The controller then holds the measured angle, waits at
 least `yaw_observation_pause_sec` (0.2 seconds), and requires a camera capture
 taken after that stop before starting another correction. Cached poses cannot
 queue repeated yaw steps. Pitch search, dock preparation and final insertion
 hold their captured yaw without camera alignment corrections.
-The pitch controller's post-burst camera wait also disables new yaw steps until
-a capture taken after the burst stop arrives. A yaw-step timeout logs the
-commanded step and measured movement at most every five seconds, making an
+The pitch controller's post-burst camera wait disables new yaw steps until
+a capture taken after the burst stop arrives, while allowing an active fixed
+position target to finish. It cannot replace that target with the pitch
+controller's older yaw setpoint. Actual tracking loss, contact, insertion
+handoff, or a CAN interruption still cancels the active correction.
+A yaw-step timeout logs the commanded step, measured movement, motor torque
+feedback, and drive error flag at most every five seconds, making an
 unresponsive motor visible without repeated per-step INFO messages.
 
-These are position corrections with zero commanded yaw velocity. A 4 rad/s
-velocity command would represent about 2.3 degrees in one 10 ms control tick,
-so raising the velocity command does not provide the requested small steps.
+Yaw uses the MIT position command with zero requested velocity and feed-forward
+torque. Correction gains apply only while one bounded step is active;
+completed corrections switch back to the holding gains. The MIT encoder rounds
+and bounds each field to `2^bits - 1`, matching its decoder; maximum gains no
+longer overflow into adjacent command fields.
 Motor feedback must be recent (`yaw_feedback_timeout_sec`, default 0.25 seconds)
 before using the stronger position gain. If that age window expired during a
 callback delay, the controller stops all motors and sends up to three neutral
@@ -219,14 +230,23 @@ it does not impose an arbitrary downward angle or camera offset.
 Pitch/yaw and pre-insertion extension bounds remain active. Search, approach,
 and tracking pauses have no deadline. Latch-wait has its own timeout after
 contact has stopped the zipper and captured the joint hold.
-`dock_activate_settle_sec` (1.0 seconds), `dock_open_settle_sec` (0.6 seconds),
-and `dock_deactivate_settle_sec` (0.3 seconds) cover the docking port's operations.
+`dock_activate_settle_sec` (2 seconds), `dock_open_settle_sec` (1 second),
+and `dock_deactivate_settle_sec` (2 seconds) cover the docking port's operations.
 After each wait,
 a later fresh state message must confirm the expected flags before advancing;
 an old ACTIVE or open flag alone is insufficient. If the port's servo timing is
 changed, increase these waits to cover it. `dock_prepare_timeout_sec` defaults
 to 5 seconds per preparation stage or state-recovery wait and must exceed all
 settling periods. It bounds stopped waits, not insertion.
+`dock_command_interval_sec` defaults to 2 seconds in both `docking` and
+`undocking`. Within each automatic run, all port commands respect this minimum
+spacing, including retries and a contact-triggered close cycle. If contact
+arrives before the delay expires, stop the zipper immediately and replace any
+queued activation/opening with the latch-closing sequence. Keep pitch/yaw held
+while waiting. These delays are nonblocking: joint control and state callbacks
+continue running. A queued command does not consume its operation timeout or
+settling wait; those start when the command is emitted. Manual port commands
+are independent of this turret-side spacing.
 `dock_retry_attempts` defaults to four additional IDLE/ACTIVATE/OPEN_LATCH cycles
 across the entire DOCK attempt; zero disables power-cycle retries. The count
 does not reset when preparation succeeds or a heartbeat returns. A retry needs
@@ -234,7 +254,7 @@ a fresh unoccupied state, so an offline dock node or a lost link cannot be
 repaired by blindly switching its relay. A brief insertion heartbeat gap can
 resume on confirmed powered/open feedback without consuming a retry.
 After contact, a separate closing budget uses the same retry count with
-IDLE/ACTIVATE/CLOSE_LATCH. `latch_close_settle_sec` defaults to 0.6 seconds,
+IDLE/ACTIVATE/CLOSE_LATCH. `latch_close_settle_sec` defaults to 1 second,
 and `latch_closed_pulse_width_us` defaults to 1000; match the latter to the
 docking node's `servo1_zero_us`. Retained DOCKED alone cannot bypass the
 forced close cycle. Log messages describe command confirmation rather than
@@ -279,9 +299,11 @@ Docking feedback logs show vertical angular error, measured/target pitch, and
 whether the zipper is stopped for centering/new camera feedback or extending
 a burst with pitch held, along with the commanded motor speed, at most once
 every five seconds. They also show
-camera lateral error, measured/target yaw and yaw motor velocity; separate yaw
-messages report correction, timeout and post-motion camera-wait transitions
-at DEBUG level. Routine centering/burst transitions are also DEBUG messages;
+camera lateral error, measured/target yaw, yaw motor velocity, torque feedback,
+and the drive error flag without additional high-rate prints. Separate yaw
+messages report correction and post-motion camera-wait transitions at DEBUG
+level; correction timeouts are warnings throttled to five seconds.
+Routine centering/burst transitions are also DEBUG messages;
 search, dock preparation/retries, insertion, contact, completion and failure
 remain visible at INFO. Recovery warnings include dock-state receipt age and
 the retry count; each transition logs once rather than on every control tick.

@@ -1073,6 +1073,20 @@ double Turret::GetYawMotorVelocity() const {
   return 0.0;
 }
 
+double Turret::GetYawMotorTorque() const {
+  if (yaw_motor_) {
+    return static_cast<double>(yaw_motor_->getTorque());
+  }
+  return 0.0;
+}
+
+int Turret::GetYawMotorErrorFlag() const {
+  if (yaw_motor_) {
+    return yaw_motor_->getErrorFlag();
+  }
+  return 0;
+}
+
 bool Turret::HasFreshYawFeedback(double max_age_sec) const {
   return yaw_motor_ && yaw_motor_->HasRecentFeedback(max_age_sec);
 }

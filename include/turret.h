@@ -92,6 +92,8 @@ class Turret {
   bool HasFreshYawFeedback(double max_age_sec) const;
   double GetPitchMotorAngle() const;  // Get pitch motor position (radians)
   double GetYawMotorVelocity() const;    // Get yaw motor velocity (rad/s)
+  double GetYawMotorTorque() const;      // Get yaw motor torque feedback
+  int GetYawMotorErrorFlag() const;      // Get yaw motor drive error flag
   double GetPitchMotorVelocity() const;  // Get pitch motor velocity (rad/s)
 
  private:

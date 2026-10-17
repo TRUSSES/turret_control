@@ -41,7 +41,7 @@ turret_id: 1
 docking:
   # This dock ID is independent of turret_id.
   target_dock_id: 1
-  target_tag_frame: tag36h11_0
+  target_tag_frame: tag36h11_25
   camera_frame: camera_link
   goal_camera_x_m: 0.0
   goal_camera_y_m: 0.0  # Center the tag on the camera's optical axis.
@@ -49,15 +49,30 @@ docking:
   # Activate the dock, open its latch, then insert with those same joint holds.
   # Further camera centering or lateral alignment cannot postpone the handoff.
   insertion_distance_m: 0.20
-  lateral_tolerance_m: 0.015  # Legacy parameter; no longer gates insertion.
-  lateral_deadband_m: 0.005
+  lateral_tolerance_m: 0.030  # Legacy parameter; keep >= lateral_deadband_m.
+  # Far-range yaw acceptance; within the slowdown region, use the tighter near values below.
+  lateral_deadband_m: 0.030
+  # Far-range restart threshold; near-range alignment uses the tighter values below.
+  yaw_resume_lateral_error_m: 0.050
   depth_deadband_m: 0.005
-  # Center more tightly before each two-second motor burst.
+  # Allow 2 degrees of vertical camera error before each burst, then hold
+  # measured pitch. Near-range bursts are shortened below.
   # Stop and re-center earlier if tracking drifts outside the outer window.
   # Angular tolerances keep the tag near image center at any distance.
-  centering_start_tolerance_deg: 1.0
+  centering_start_tolerance_deg: 2.0
   centering_stop_tolerance_deg: 4.0
   approach_burst_duration_sec: 2.0
+  # Smoothly reduce speed and burst length from 45 cm, reaching near values at 25 cm.
+  approach_slowdown_start_m: 0.45
+  approach_slowdown_end_m: 0.25
+  near_zipper_motor_velocity_rad_s: 1.2  # Keep the measured minimum movement speed.
+  near_approach_burst_duration_sec: 0.5
+  near_pitch_scale: 0.5  # Smaller pitch target changes and lead over the encoder.
+  # If centering needs more pitch than the limit allows, finish the short approach
+  # with pitch held, fresh tracking, and the same 20 cm insertion handoff.
+  pitch_limit_approach_window_m: 0.25
+  pitch_limit_margin_deg: 1.0
+  pitch_limit_max_vertical_error_deg: 6.0
   # Allow the observed camera/delivery delay without treating each gap as failure.
   # Older poses still stop the approach until a fresh measurement arrives.
   pose_timeout_sec: 1.0
@@ -69,28 +84,41 @@ docking:
   # Positive measured pitch moves down from the homed position.
   pitch_down_sign: 1.0
   pitch_min_deg: 0.0
-  pitch_max_deg: 63.0
+  pitch_max_deg: 70.0  # Docking only; undocking retains its separate 63-degree ceiling.
   # Set yaw_correction_sign after checking motor direction against camera x.
   yaw_correction_sign: 1.0
-  yaw_limit_from_start_deg: 30.0
   pitch_gain_rad_per_m: 10.0
   yaw_gain: 1.5
-  max_pitch_rate_deg_s: 5.0
-  # Cable motor speed is separate from the turret joint target's rate.
-  # Do not cap it below the existing 0.20 rad/s correction minimum.
-  pitch_motor_velocity_limit_rad_s: 0.35
+  # Blend fine/coarse target motion using the tag's vertical angular error.
+  # Below 3 deg keep small, slow targets; at 8 deg use the coarse settings.
+  max_pitch_rate_deg_s: 15.0
+  fine_pitch_rate_deg_s: 5.0
+  pitch_fine_error_deg: 3.0
+  pitch_coarse_error_deg: 8.0
+  # Shared fine cable-motor profile. Undocking has its own higher coarse cap.
+  # Speed tapers near the held pitch; keep the working 0.20 rad/s minimum.
+  pitch_motor_velocity_limit_rad_s: 0.80
+  pitch_motor_fine_velocity_rad_s: 0.25
+  pitch_motor_fine_error_deg: 2.0
+  pitch_motor_coarse_error_deg: 6.0
   max_yaw_rate_deg_s: 5.0
-  max_pitch_step_deg: 2.0
-  # Each correction requests this full step from measured yaw, even if the
-  # camera-guided request is initially smaller than the completion deadband.
-  # One degree is about six feedback increments with the configured MIT range.
-  max_yaw_step_deg: 1.0
-  # Holding gains also apply to insertion and undocking; correction gains apply
-  # only while reaching one bounded yaw position step (commanded velocity = 0).
+  max_pitch_step_deg: 6.0
+  fine_pitch_step_deg: 2.0
+  # Each correction uses this fixed step from measured yaw in the direction
+  # of the current camera error. There is no cumulative yaw travel cutoff.
+  max_yaw_step_deg: 3.0
+  yaw_motor_velocity_rad_s: 3.5  # Below 3 rad/s does not overcome mechanical friction.
+  # Each burst polls position/CAN feedback and brakes before returning.
+  yaw_velocity_pulse_sec: 0.015  # Maximum 15 ms per burst; may stop sooner at target.
+  # Near the dock, use smaller steps/shorter pulses while retaining the 3.5 rad/s
+  # movement command that overcomes friction. Reacquire a tighter lateral goal.
+  near_yaw_step_deg: 1.5
+  near_yaw_velocity_pulse_sec: 0.008
+  near_yaw_lateral_deadband_m: 0.010
+  near_yaw_lateral_resume_m: 0.020
+  # Position holding gains apply between bursts, at insertion, and undocking.
   yaw_position_kp: 160.0
   yaw_position_kd: 2.0
-  yaw_correction_kp: 250.0
-  yaw_correction_kd: 1.0
   yaw_target_deadband_deg: 0.2
   yaw_adjustment_timeout_sec: 2.0
   # Require a capture taken after the previous correction before another step.
@@ -99,10 +127,10 @@ docking:
   # These extension bounds apply to the vision approach, not insertion.
   extension_min_m: 0.0
   extension_max_m: 0.90
-  # Direct motor speed throughout each approach burst, held until its deadline.
-  zipper_motor_velocity_rad_s: 1.2  # Measured minimum that moves this zipper.
+  # Direct motor speed at long range; smoothly reduced by the near profile.
+  zipper_motor_velocity_rad_s: 1.5
   search_pitch_span_deg: 63.0
-  search_pitch_rate_deg_s: 5.0
+  search_pitch_rate_deg_s: 15.0
   # Send ACTIVATE and then OPEN_LATCH at the camera handoff, not during approach.
   # Wait for new state feedback after each operation's minimum settling time.
   # Keep power switching and servo commands apart during preparation/retries.
@@ -119,7 +147,7 @@ docking:
   # Search and tracking pauses have no timeout; tracking resumes on a fresh tag.
   # Insertion runs at fixed motor velocity until contact, with NO travel/time cutoff.
   # Zipper speeds below are motor rad/s, not extension m/s.
-  insertion_velocity_rad_s: 1.2  # Insert at the measured minimum working speed.
+  insertion_velocity_rad_s: 1.4  # Slightly faster insertion; contact still stops it.
   latch_timeout_sec: 8.0
   latch_close_settle_sec: 1.0
   # Match docking node's servo1_zero_us. This confirms the commanded pulse;
@@ -136,11 +164,14 @@ undocking:
   dock_retry_attempts: 4  # Additional cycles; independent of docking retries.
   # First retract this measured distance with the docking pitch held.
   # Never retract below target_extension_m to finish clearance.
-  slow_clearance_m: 0.15
+  slow_clearance_m: 0.10
   slow_velocity_rad_s: 1.2
-  # Capture and hold measured pitch after clearance while retracting to 30 cm.
+  # After clearance, track 60 deg while retracting faster to 30 cm.
+  fast_velocity_rad_s: 2.0
+  cruise_pitch_deg: 60.0
+  # Undocking can take up cable faster, tapering near the held/final angle.
+  pitch_motor_velocity_limit_rad_s: 1.2
   # Pause retraction and correct pitch if the measured angle exceeds this cap.
-  fast_velocity_rad_s: 1.8
   pitch_max_deg: 63.0
   intermediate_extension_m: 0.30
   # At 30 cm, adjust toward 20 degrees while retracting to 10 cm, then READY.

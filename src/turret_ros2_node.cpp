@@ -1,4 +1,5 @@
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/utilities.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_srvs/srv/empty.hpp>
@@ -25,7 +26,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <signal.h>
+#include <thread>
 #include <pigpio.h>
 
 using namespace std::chrono_literals;
@@ -240,6 +241,7 @@ public:
         RCLCPP_INFO(this->get_logger(), "Shutting down turret node");
         if (turret_) {
             turret_->RequestZeroAbort();
+            if (zero_future_.valid()) zero_future_.wait();
             turret_->StopAllMotors();
         }
         // pigpio is terminated in main() after all nodes are destroyed
@@ -305,13 +307,18 @@ private:
     std::string docking_yaw_status_;
     double docking_yaw_position_kp_ = 160.0;
     double docking_yaw_position_kd_ = 2.0;
-    double docking_yaw_correction_kp_ = 250.0;
-    double docking_yaw_correction_kd_ = 1.0;
     double docking_yaw_feedback_timeout_sec_ = 0.25;
     double docking_goal_camera_x_m_ = 0.0;
     DockingController::Output docking_output_{};
     bool have_docking_output_ = false;
     bool docking_actuation_failed_ = false;
+    bool docking_yaw_feedback_paused_ = false;
+    double docking_yaw_pause_pitch_rad_ = 0.0;
+    bool yaw_can_feedback_paused_ = false;
+    std::uint64_t yaw_can_pause_sequence_ = 0;
+    double yaw_can_pause_started_sec_ = 0.0;
+    double yaw_can_paused_duration_sec_ = 0.0;
+    std::int64_t yaw_can_visual_resume_after_stamp_ns_ = 0;
     std::string docking_status_ = "Docking inactive";
     bool vision_tag_visible_ = false;
     bool have_tag_pose_ = false;
@@ -323,13 +330,15 @@ private:
     double docking_camera_vertical_sign_ = 1.0;
     std::string docking_camera_frame_ = "camera_link";
     double docking_extension_max_m_ = 0.90;
-    double docking_max_pitch_motor_velocity_rad_s_ = 0.35;
+    double docking_max_pitch_motor_velocity_rad_s_ = 0.80;
+    turret_control::DockingPitchController::Config docking_pitch_control_config_{};
     std::unique_ptr<UndockingController> undocking_controller_;
     UndockingController::Output undocking_output_{};
     bool undocking_ready_hold_ = false;
     bool undocking_actuation_failed_ = false;
     std::string undocking_status_ = "Undocking inactive";
     double undocking_pitch_max_rad_ = 63.0 * M_PI / 180.0;
+    double undocking_max_pitch_motor_velocity_rad_s_ = 1.2;
     geometry_msgs::msg::PoseStamped latest_tag_pose_camera_;
     rclcpp::Time latest_tag_pose_time_{0, 0, RCL_ROS_TIME};
     rclcpp::Time latest_tag_receipt_time_{0, 0, RCL_ROS_TIME};
@@ -374,28 +383,47 @@ private:
         declare_double("goal_camera_x_m", 0.0);
         declare_double("goal_camera_y_m", 0.0);
         declare_double("insertion_distance_m", 0.20);
-        declare_double("lateral_tolerance_m", 0.015);
-        declare_double("lateral_deadband_m", 0.005);
+        declare_double("lateral_tolerance_m", 0.030);
+        declare_double("lateral_deadband_m", 0.030);
+        declare_double("yaw_resume_lateral_error_m", 0.050);
         declare_double("depth_deadband_m", 0.005);
-        declare_double("centering_start_tolerance_deg", 1.0);
+        declare_double("centering_start_tolerance_deg", 2.0);
         declare_double("centering_stop_tolerance_deg", 4.0);
         declare_double("approach_burst_duration_sec", 2.0);
+        declare_double("approach_slowdown_start_m", 0.45);
+        declare_double("approach_slowdown_end_m", 0.25);
+        declare_double("near_zipper_motor_velocity_rad_s", 1.2);
+        declare_double("near_approach_burst_duration_sec", 0.5);
+        declare_double("near_pitch_scale", 0.5);
+        declare_double("pitch_limit_approach_window_m", 0.25);
+        declare_double("pitch_limit_margin_deg", 1.0);
+        declare_double("pitch_limit_max_vertical_error_deg", 6.0);
         declare_double("pitch_min_deg", 0.0);
-        declare_double("pitch_max_deg", 63.0);
-        declare_double("yaw_limit_from_start_deg", 30.0);
+        declare_double("pitch_max_deg", 70.0);
         declare_double("pitch_down_sign", 1.0);
         declare_double("yaw_correction_sign", 1.0);
         declare_double("pitch_gain_rad_per_m", 10.0);
         declare_double("yaw_gain", 1.5);
-        declare_double("max_pitch_rate_deg_s", 5.0);
-        declare_double("pitch_motor_velocity_limit_rad_s", 0.35);
+        declare_double("max_pitch_rate_deg_s", 15.0);
+        declare_double("fine_pitch_rate_deg_s", 5.0);
+        declare_double("pitch_fine_error_deg", 3.0);
+        declare_double("pitch_coarse_error_deg", 8.0);
+        declare_double("pitch_motor_velocity_limit_rad_s", 0.80);
+        declare_double("pitch_motor_fine_velocity_rad_s", 0.25);
+        declare_double("pitch_motor_fine_error_deg", 2.0);
+        declare_double("pitch_motor_coarse_error_deg", 6.0);
         declare_double("max_yaw_rate_deg_s", 5.0);
-        declare_double("max_pitch_step_deg", 2.0);
-        declare_double("max_yaw_step_deg", 1.0);
+        declare_double("max_pitch_step_deg", 6.0);
+        declare_double("fine_pitch_step_deg", 2.0);
+        declare_double("max_yaw_step_deg", 3.0);
         declare_double("yaw_position_kp", 160.0);
         declare_double("yaw_position_kd", 2.0);
-        declare_double("yaw_correction_kp", 250.0);
-        declare_double("yaw_correction_kd", 1.0);
+        declare_double("yaw_motor_velocity_rad_s", 3.5);
+        declare_double("yaw_velocity_pulse_sec", 0.015);
+        declare_double("near_yaw_step_deg", 1.5);
+        declare_double("near_yaw_velocity_pulse_sec", 0.008);
+        declare_double("near_yaw_lateral_deadband_m", 0.010);
+        declare_double("near_yaw_lateral_resume_m", 0.020);
         declare_double("yaw_target_deadband_deg", 0.2);
         declare_double("yaw_adjustment_timeout_sec", 2.0);
         declare_double("yaw_observation_pause_sec", 0.2);
@@ -404,9 +432,9 @@ private:
         declare_double("extension_min_m", 0.0);
         declare_double("extension_max_m", 0.90);
         declare_double("search_pitch_span_deg", 63.0);
-        declare_double("search_pitch_rate_deg_s", 5.0);
-        declare_double("zipper_motor_velocity_rad_s", 1.2);
-        declare_double("insertion_velocity_rad_s", 1.2);
+        declare_double("search_pitch_rate_deg_s", 15.0);
+        declare_double("zipper_motor_velocity_rad_s", 1.5);
+        declare_double("insertion_velocity_rad_s", 1.4);
         declare_double("dock_activate_settle_sec", 2.0);
         declare_double("dock_open_settle_sec", 1.0);
         declare_double("dock_prepare_timeout_sec", 5.0);
@@ -431,10 +459,9 @@ private:
             target_descriptor);
         this->declare_parameter<std::string>("docking_camera_frame",
             docking && docking["camera_frame"] ? docking["camera_frame"].as<std::string>() : "camera_link");
-        const int configured_turret_id = config_["turret_id"] ? config_["turret_id"].as<int>() : 1;
         this->declare_parameter<std::string>("docking_target_tag_frame",
             docking && docking["target_tag_frame"] ? docking["target_tag_frame"].as<std::string>() :
-            "tag36h11_" + std::to_string(configured_turret_id - 1), target_descriptor);
+            "tag36h11_25", target_descriptor);
         const auto tag_frame = this->get_parameter("docking_target_tag_frame").as_string();
         if (tag_frame.empty() || tag_frame.find('/') != std::string::npos ||
             tag_frame.find_first_of(" \t\r\n") != std::string::npos) {
@@ -461,28 +488,44 @@ private:
         settings.centering_start_tolerance_rad = get("centering_start_tolerance_deg") * M_PI / 180.0;
         settings.centering_stop_tolerance_rad = get("centering_stop_tolerance_deg") * M_PI / 180.0;
         settings.approach_burst_duration_sec = get("approach_burst_duration_sec");
+        settings.approach_profile.slowdown_start_m = get("approach_slowdown_start_m");
+        settings.approach_profile.slowdown_end_m = get("approach_slowdown_end_m");
+        settings.near_zipper_motor_velocity_rad_s = get("near_zipper_motor_velocity_rad_s");
+        settings.near_approach_burst_duration_sec = get("near_approach_burst_duration_sec");
+        settings.near_pitch_scale = get("near_pitch_scale");
+        settings.pitch_limit_approach_window_m = get("pitch_limit_approach_window_m");
+        settings.pitch_limit_margin_rad = get("pitch_limit_margin_deg") * M_PI / 180.0;
+        settings.pitch_limit_max_vertical_error_rad = get("pitch_limit_max_vertical_error_deg") * M_PI / 180.0;
         settings.pitch_min_rad = get("pitch_min_deg") * M_PI / 180.0;
         settings.pitch_max_rad = get("pitch_max_deg") * M_PI / 180.0;
-        settings.yaw_limit_from_start_rad = get("yaw_limit_from_start_deg") * M_PI / 180.0;
         settings.pitch_down_sign = get("pitch_down_sign");
         settings.yaw_correction_sign = get("yaw_correction_sign");
         settings.pitch_gain_rad_per_m = get("pitch_gain_rad_per_m");
         settings.yaw_gain = get("yaw_gain");
         settings.max_pitch_rate_rad_s = get("max_pitch_rate_deg_s") * M_PI / 180.0;
+        settings.fine_pitch_rate_rad_s = get("fine_pitch_rate_deg_s") * M_PI / 180.0;
+        settings.pitch_fine_error_rad = get("pitch_fine_error_deg") * M_PI / 180.0;
+        settings.pitch_coarse_error_rad = get("pitch_coarse_error_deg") * M_PI / 180.0;
         settings.max_yaw_rate_rad_s = get("max_yaw_rate_deg_s") * M_PI / 180.0;
         settings.max_pitch_step_rad = get("max_pitch_step_deg") * M_PI / 180.0;
+        settings.fine_pitch_step_rad = get("fine_pitch_step_deg") * M_PI / 180.0;
         settings.max_yaw_step_rad = get("max_yaw_step_deg") * M_PI / 180.0;
         docking_yaw_config_.step_rad = settings.max_yaw_step_rad;
+        docking_yaw_config_.motor_velocity_rad_s = get("yaw_motor_velocity_rad_s");
+        docking_yaw_config_.velocity_pulse_sec = get("yaw_velocity_pulse_sec");
+        docking_yaw_config_.approach_profile = settings.approach_profile;
+        docking_yaw_config_.near_step_rad = get("near_yaw_step_deg") * M_PI / 180.0;
+        docking_yaw_config_.near_velocity_pulse_sec = get("near_yaw_velocity_pulse_sec");
+        docking_yaw_config_.near_camera_lateral_deadband_m = get("near_yaw_lateral_deadband_m");
+        docking_yaw_config_.near_camera_lateral_resume_m = get("near_yaw_lateral_resume_m");
         docking_yaw_config_.target_deadband_rad = get("yaw_target_deadband_deg") * M_PI / 180.0;
         docking_yaw_config_.adjustment_timeout_sec = get("yaw_adjustment_timeout_sec");
         docking_yaw_config_.observation_pause_sec = get("yaw_observation_pause_sec");
-        docking_yaw_config_.yaw_limit_from_start_rad = settings.yaw_limit_from_start_rad;
         docking_yaw_config_.yaw_correction_sign = settings.yaw_correction_sign;
         docking_yaw_config_.camera_lateral_deadband_m = settings.lateral_deadband_m;
+        docking_yaw_config_.camera_lateral_resume_m = get("yaw_resume_lateral_error_m");
         docking_yaw_position_kp_ = get("yaw_position_kp");
         docking_yaw_position_kd_ = get("yaw_position_kd");
-        docking_yaw_correction_kp_ = get("yaw_correction_kp");
-        docking_yaw_correction_kd_ = get("yaw_correction_kd");
         docking_yaw_feedback_timeout_sec_ = get("yaw_feedback_timeout_sec");
         docking_goal_camera_x_m_ = settings.goal_camera_x_m;
         settings.max_dt_sec = get("max_dt_sec");
@@ -513,6 +556,9 @@ private:
         docking_state_timeout_sec_ = get("state_timeout_sec");
         docking_command_period_sec_ = get("command_period_sec");
         docking_max_pitch_motor_velocity_rad_s_ = get("pitch_motor_velocity_limit_rad_s");
+        docking_pitch_control_config_.fine_velocity_rad_s = get("pitch_motor_fine_velocity_rad_s");
+        docking_pitch_control_config_.fine_error_rad = get("pitch_motor_fine_error_deg") * M_PI / 180.0;
+        docking_pitch_control_config_.coarse_error_rad = get("pitch_motor_coarse_error_deg") * M_PI / 180.0;
         docking_camera_forward_sign_ = get("camera_forward_sign");
         docking_camera_vertical_sign_ = get("camera_vertical_sign");
         docking_camera_frame_ = this->get_parameter("docking_camera_frame").as_string();
@@ -522,11 +568,16 @@ private:
             !std::isfinite(docking_max_pitch_motor_velocity_rad_s_) ||
             docking_max_pitch_motor_velocity_rad_s_ < 0.20 ||
             docking_max_pitch_motor_velocity_rad_s_ > 2.0 ||
+            !turret_control::DockingPitchController::validConfig(docking_pitch_control_config_) ||
             docking_command_period_sec_ > 0.5 || docking_camera_frame_.empty() ||
             !std::isfinite(docking_yaw_position_kp_) || docking_yaw_position_kp_ <= 0.0 || docking_yaw_position_kp_ > 500.0 ||
             !std::isfinite(docking_yaw_position_kd_) || docking_yaw_position_kd_ <= 0.0 || docking_yaw_position_kd_ > 5.0 ||
-            !std::isfinite(docking_yaw_correction_kp_) || docking_yaw_correction_kp_ <= 0.0 || docking_yaw_correction_kp_ > 500.0 ||
-            !std::isfinite(docking_yaw_correction_kd_) || docking_yaw_correction_kd_ <= 0.0 || docking_yaw_correction_kd_ > 5.0 ||
+            !std::isfinite(docking_yaw_config_.motor_velocity_rad_s) ||
+            docking_yaw_config_.motor_velocity_rad_s <= 0.0 || docking_yaw_config_.motor_velocity_rad_s > 5.0 ||
+            !std::isfinite(docking_yaw_config_.velocity_pulse_sec) ||
+            docking_yaw_config_.velocity_pulse_sec <= 0.0 || docking_yaw_config_.velocity_pulse_sec > 0.05 ||
+            !std::isfinite(docking_yaw_config_.camera_lateral_resume_m) ||
+            docking_yaw_config_.camera_lateral_resume_m < settings.lateral_deadband_m ||
             !std::isfinite(docking_yaw_feedback_timeout_sec_) || docking_yaw_feedback_timeout_sec_ <= 0.0 ||
             std::fabs(docking_camera_forward_sign_) != 1.0 ||
             std::fabs(docking_camera_vertical_sign_) != 1.0) {
@@ -547,9 +598,11 @@ private:
         declare_double("target_pitch_deg", 20.0);
         declare_double("intermediate_extension_m", 0.30);
         declare_double("pitch_max_deg", 63.0);
-        declare_double("slow_clearance_m", 0.15);
+        declare_double("slow_clearance_m", 0.10);
         declare_double("slow_velocity_rad_s", 1.2);
-        declare_double("fast_velocity_rad_s", 1.8);
+        declare_double("fast_velocity_rad_s", 2.0);
+        declare_double("cruise_pitch_deg", 60.0);
+        declare_double("pitch_motor_velocity_limit_rad_s", 1.2);
         declare_double("extension_tolerance_m", 0.005);
         declare_double("pitch_tolerance_deg", 2.0);
         declare_double("dock_deactivate_settle_sec", 2.0);
@@ -561,7 +614,7 @@ private:
             section && section["dock_retry_attempts"] ? section["dock_retry_attempts"].as<int>() : 4);
     }
 
-    UndockingController::Config loadUndockingConfig() const
+    UndockingController::Config loadUndockingConfig()
     {
         UndockingController::Config settings;
         auto get = [&](const char *key) {
@@ -569,10 +622,17 @@ private:
         };
         settings.target_extension_m = get("target_extension_m");
         settings.target_pitch_rad = get("target_pitch_deg") * M_PI / 180.0;
+        settings.cruise_pitch_rad = get("cruise_pitch_deg") * M_PI / 180.0;
         settings.intermediate_extension_m = get("intermediate_extension_m");
         settings.slow_clearance_m = get("slow_clearance_m");
         settings.slow_velocity_rad_s = get("slow_velocity_rad_s");
         settings.fast_velocity_rad_s = get("fast_velocity_rad_s");
+        undocking_max_pitch_motor_velocity_rad_s_ = get("pitch_motor_velocity_limit_rad_s");
+        if (!std::isfinite(undocking_max_pitch_motor_velocity_rad_s_) ||
+            undocking_max_pitch_motor_velocity_rad_s_ < 0.20 ||
+            undocking_max_pitch_motor_velocity_rad_s_ > 2.0) {
+            throw std::invalid_argument("undocking_pitch_motor_velocity_limit_rad_s must be from 0.20 to 2.0 rad/s");
+        }
         settings.extension_tolerance_m = get("extension_tolerance_m");
         settings.pitch_tolerance_rad = get("pitch_tolerance_deg") * M_PI / 180.0;
         settings.pitch_min_rad = this->get_parameter("docking_pitch_min_deg").as_double() * M_PI / 180.0;
@@ -1073,11 +1133,35 @@ private:
         ++dock_state_sequence_;
     }
 
+    void receiveQueuedDockState()
+    {
+        // Startup briefly blocks this node's mutually exclusive callbacks.
+        // Consume actual queued DDS samples rather than freshening an old cache.
+        docking::msg::DockingState state;
+        rclcpp::MessageInfo info;
+        for (int received = 0; received < 32 && dock_state_sub_->take(state, info); ++received) {
+            dockStateCallback(std::make_shared<docking::msg::DockingState>(state));
+        }
+    }
+
+    static double steadyNowSec()
+    {
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    double autonomousNowSec() const
+    {
+        // Communication pauses stop motion and phase deadlines together. Camera
+        // timestamps below remain in ROS time and still have to be fresh.
+        const double now_sec = yaw_can_feedback_paused_ ? yaw_can_pause_started_sec_ : steadyNowSec();
+        return now_sec - yaw_can_paused_duration_sec_;
+    }
+
     DockingController::Input dockingInput() const
     {
         DockingController::Input input;
-        input.now_sec = std::chrono::duration<double>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+        input.now_sec = autonomousNowSec();
         input.extension_m = current_extension_;
         input.pitch_rad = current_pitch_angle_;
         input.yaw_rad = current_yaw_angle_;
@@ -1088,6 +1172,8 @@ private:
         const double receipt_age = (now - latest_tag_receipt_time_).seconds();
         input.pose_fresh = have_tag_pose_ && vision_tag_visible_ &&
             latest_tag_pose_camera_.header.frame_id == docking_camera_frame_ &&
+            (yaw_can_visual_resume_after_stamp_ns_ == 0 ||
+             input.pose_stamp_ns > yaw_can_visual_resume_after_stamp_ns_) &&
             pose_age >= -0.05 && pose_age <= docking_pose_timeout_sec_ &&
             receipt_age >= 0.0 && receipt_age <= docking_pose_timeout_sec_;
         input.camera_x_m = latest_tag_pose_camera_.pose.position.x;
@@ -1109,36 +1195,139 @@ private:
         return input;
     }
 
-    bool refreshDockingYawFeedback()
+    void validateYawMotorFeedback() const
     {
-        const bool needs_refresh = !turret_->HasFreshYawFeedback(docking_yaw_feedback_timeout_sec_);
-        if (needs_refresh) {
-            // A delayed callback can outlive the feedback-age window. Stop
-            // before asking for another reply, without stiffness or motion.
-            turret_->StopAllMotors();
-            for (int attempt = 0; attempt < 2 &&
-                 !turret_->HasFreshYawFeedback(docking_yaw_feedback_timeout_sec_); ++attempt) {
-                turret_->SetYawVelocity(0.0);
+        if (!std::isfinite(turret_->GetYawAngle()) ||
+            !std::isfinite(turret_->GetYawMotorVelocity()) || turret_->GetYawMotorErrorFlag() != 0) {
+            throw std::runtime_error(std::string("Invalid yaw encoder feedback or motor drive error: ") +
+                turret_->GetYawFeedbackDiagnostics());
+        }
+    }
+
+    void acquireDockingYawReference()
+    {
+        turret_->StopAllMotors();
+        const auto initial_sequence = turret_->GetYawFeedbackSequence();
+        const auto deadline = std::chrono::steady_clock::now() + 500ms;
+        do {
+            // Query the encoder with zero velocity and no position stiffness.
+            // A recent cached value alone cannot establish the new reference.
+            turret_->SetYawVelocity(0.0);
+            if (turret_->GetYawFeedbackSequence() > initial_sequence &&
+                turret_->HasFreshYawFeedback(docking_yaw_feedback_timeout_sec_)) {
+                validateYawMotorFeedback();
+                current_yaw_angle_ = turret_->GetYawAngle();
+                return;
+            }
+            std::this_thread::sleep_for(3ms);
+        } while (std::chrono::steady_clock::now() < deadline);
+        throw std::runtime_error(std::string("Yaw encoder did not reply to stopped queries within 0.5 s: ") +
+            turret_->GetYawFeedbackDiagnostics());
+    }
+
+    void beginYawCanFeedbackPause()
+    {
+        if (!yaw_can_feedback_paused_) {
+            yaw_can_pause_started_sec_ = steadyNowSec();
+            yaw_can_pause_sequence_ = turret_->GetYawFeedbackSequence();
+            yaw_can_feedback_paused_ = true;
+            const auto phase = docking_controller_ ? docking_controller_->phase() : DockingController::Phase::IDLE;
+            if (phase == DockingController::Phase::SEARCH || phase == DockingController::Phase::PITCH_CENTER ||
+                phase == DockingController::Phase::APPROACH || phase == DockingController::Phase::WAIT_FOR_TAG) {
+                // Resume visual motion only from a capture made after this stop.
+                // Insertion/port phases do not depend on camera reacquisition.
+                yaw_can_visual_resume_after_stamp_ns_ = this->now().nanoseconds();
             }
         }
-        if (!turret_->HasFreshYawFeedback(docking_yaw_feedback_timeout_sec_)) {
-            return false;
+        have_docking_output_ = false;
+    }
+
+    void reportYawCanFeedbackPause()
+    {
+        const std::string status = std::string("Paused for yaw CAN feedback; stopped and waiting to resume: ") +
+            turret_->GetYawFeedbackDiagnostics();
+        if (current_state_ == TurretState::DOCKING) docking_status_ = status;
+        else undocking_status_ = status;
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "%s", status.c_str());
+    }
+
+    bool refreshDockingYawFeedback()
+    {
+        if (!turret_->HasFreshYawFeedback(docking_yaw_feedback_timeout_sec_) || yaw_can_feedback_paused_) {
+            beginYawCanFeedbackPause();
+            // Stop before querying; each timer tick makes only a few requests.
+            // A delayed reply pauses docking instead of permanently failing it.
+            turret_->StopAllMotors();
+            for (int attempt = 0; attempt < 2 &&
+                 (!turret_->HasFreshYawFeedback(docking_yaw_feedback_timeout_sec_) ||
+                  turret_->GetYawFeedbackSequence() <= yaw_can_pause_sequence_); ++attempt) {
+                turret_->SetYawVelocity(0.0);
+            }
+            if (!turret_->HasFreshYawFeedback(docking_yaw_feedback_timeout_sec_) ||
+                turret_->GetYawFeedbackSequence() <= yaw_can_pause_sequence_) {
+                reportYawCanFeedbackPause();
+                return false;
+            }
         }
+        validateYawMotorFeedback();
         current_yaw_angle_ = turret_->GetYawAngle();
-        if (needs_refresh && docking_yaw_controller_) {
+        if (yaw_can_feedback_paused_) {
+            yaw_can_paused_duration_sec_ += steadyNowSec() - yaw_can_pause_started_sec_;
+            yaw_can_feedback_paused_ = false;
             // Discard an interrupted nudge before stronger position control
             // resumes. An interrupted nudge waits for a new camera capture.
-            const auto input = dockingInput();
-            DockingYawController::Input yaw_input;
-            yaw_input.now_sec = input.now_sec;
-            yaw_input.camera_now_ns = input.camera_now_ns;
-            yaw_input.pose_stamp_ns = input.pose_stamp_ns;
-            yaw_input.yaw_rad = input.yaw_rad;
-            yaw_input.requested_yaw_rad = input.yaw_rad;
-            yaw_input.allow_alignment = false;
-            docking_yaw_controller_->update(yaw_input);
+            if (docking_yaw_controller_) {
+                auto yaw_input = dockingYawFeedbackInput(dockingInput());
+                yaw_input.allow_alignment = false;
+                const auto feedback = docking_yaw_controller_->update(yaw_input);
+                if (feedback.failed) throw std::runtime_error(feedback.status);
+            }
+            RCLCPP_INFO(this->get_logger(), "Yaw CAN feedback restored; resuming from measured joints");
         }
         return true;
+    }
+
+    DockingYawController::Input dockingYawFeedbackInput(const DockingController::Input& input) const
+    {
+        DockingYawController::Input yaw_input;
+        yaw_input.now_sec = input.now_sec;
+        yaw_input.camera_now_ns = input.camera_now_ns;
+        yaw_input.pose_stamp_ns = input.pose_stamp_ns;
+        yaw_input.yaw_rad = input.yaw_rad;
+        yaw_input.camera_z_m = input.camera_z_m;
+        yaw_input.requested_yaw_rad = input.yaw_rad;
+        yaw_input.feedback_sequence = turret_->GetYawFeedbackSequence();
+        const auto phase = docking_controller_ ? docking_controller_->phase() : DockingController::Phase::IDLE;
+        yaw_input.require_recovery_capture =
+            phase == DockingController::Phase::PITCH_CENTER ||
+            phase == DockingController::Phase::APPROACH ||
+            phase == DockingController::Phase::WAIT_FOR_TAG ||
+            (phase == DockingController::Phase::SEARCH && input.pose_fresh);
+        return yaw_input;
+    }
+
+    void pauseDockingForYawFeedback(const DockingController::Input& input,
+                                    const DockingYawController::Output& feedback)
+    {
+        if (!docking_yaw_feedback_paused_) docking_yaw_pause_pitch_rad_ = input.pitch_rad;
+        docking_yaw_feedback_paused_ = true;
+        have_docking_output_ = false;
+        docking_status_ = std::string("Docking paused for yaw feedback: ") + feedback.status;
+        // Stop the zipper and keep measured pitch held. Until CAN confirmation,
+        // brake yaw without pulling toward an unconfirmed position sample.
+        turret_->ActuateDockingPitch(docking_yaw_pause_pitch_rad_, docking_max_pitch_motor_velocity_rad_s_);
+        if (feedback.waiting_for_capture) {
+            // The CAN confirmation has completed. Hold that fixed angle while
+            // waiting for the camera, rather than leaving yaw free to drift.
+            turret_->HoldYawPosition(feedback.yaw_rad, docking_yaw_position_kp_,
+                                    docking_yaw_position_kd_);
+        } else {
+            turret_->HoldYawPosition(0.0, 0.0, 5.0);
+        }
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+            "%s; change=%.2f deg measured=%.2f deg; waiting to resume",
+            docking_status_.c_str(), feedback.feedback_jump_rad * 180.0 / M_PI,
+            input.yaw_rad * 180.0 / M_PI);
     }
 
     void executeAutonomousDockingCommand()
@@ -1149,7 +1338,25 @@ private:
         }
         // Refresh before the core can capture its insertion yaw reference.
         const bool yaw_feedback_fresh = refreshDockingYawFeedback();
+        if (!yaw_feedback_fresh) return;
         const auto input = dockingInput();
+        // Validate before the docking core can capture yaw at the handoff or
+        // command more extension. A suspected jump is a recoverable pause.
+        if (yaw_feedback_fresh && docking_yaw_controller_) {
+            const auto feedback = docking_yaw_controller_->observeFeedback(dockingYawFeedbackInput(input));
+            if (feedback.failed) throw std::runtime_error(feedback.status);
+            if (feedback.feedback_recovery_required) {
+                pauseDockingForYawFeedback(input, feedback);
+                return;
+            }
+            if (docking_yaw_feedback_paused_) {
+                if (!docking_controller_->resynchronizeYawHold(feedback.yaw_rad)) {
+                    throw std::runtime_error("Confirmed yaw recovery is not a finite encoder position");
+                }
+                docking_yaw_feedback_paused_ = false;
+                RCLCPP_INFO(this->get_logger(), "Yaw feedback recovered; resuming docking from measured joints");
+            }
+        }
         const auto phase = docking_controller_->phase();
         const bool tracking_lost = !input.pose_fresh &&
             (phase == DockingController::Phase::APPROACH || phase == DockingController::Phase::PITCH_CENTER);
@@ -1239,29 +1446,17 @@ private:
         // STOP bypasses both trajectory functions; their zero speed is not a stop command.
         if (docking_output_.actuation == DockingController::Actuation::STOP) {
             if (docking_yaw_controller_) {
-                DockingYawController::Input yaw_input;
-                yaw_input.now_sec = input.now_sec;
-                yaw_input.camera_now_ns = input.camera_now_ns;
-                yaw_input.pose_stamp_ns = input.pose_stamp_ns;
-                yaw_input.yaw_rad = input.yaw_rad;
-                yaw_input.requested_yaw_rad = input.yaw_rad;
+                auto yaw_input = dockingYawFeedbackInput(input);
                 yaw_input.allow_alignment = false;
                 docking_yaw_controller_->update(yaw_input);
             }
             turret_->StopAllMotors();
             return;
         }
-        if (!yaw_feedback_fresh) {
-            throw std::runtime_error("No fresh yaw CAN feedback after stopped neutral queries; docking motors stopped");
-        }
         if (!docking_yaw_controller_) {
             throw std::logic_error("Docking yaw controller is unavailable");
         }
-        DockingYawController::Input yaw_input;
-        yaw_input.now_sec = input.now_sec;
-        yaw_input.camera_now_ns = input.camera_now_ns;
-        yaw_input.pose_stamp_ns = input.pose_stamp_ns;
-        yaw_input.yaw_rad = input.yaw_rad;
+        auto yaw_input = dockingYawFeedbackInput(input);
         yaw_input.requested_yaw_rad = docking_output_.yaw_rad;
         yaw_input.camera_x_error_m = input.camera_x_m - docking_goal_camera_x_m_;
         // A post-burst camera wait blocks a new correction, but must not discard
@@ -1274,6 +1469,10 @@ private:
         const auto yaw_output = docking_yaw_controller_->update(yaw_input);
         if (yaw_output.failed) {
             throw std::runtime_error(yaw_output.status);
+        }
+        if (yaw_output.feedback_recovery_required) {
+            pauseDockingForYawFeedback(input, yaw_output);
+            return;
         }
         if (yaw_output.step_timed_out) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
@@ -1298,7 +1497,7 @@ private:
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                 "Docking feedback: tag_z=%.3f m vertical_error=%.2f deg pitch=%.2f -> %.2f deg "
                 "extension=%.3f m zipper=%s velocity=%.2f rad/s camera_x_error=%.3f m "
-                "yaw=%.2f -> %.2f deg yaw_motor_velocity=%.3f rad/s "
+                "yaw=%.2f -> %.2f deg yaw_command_velocity=%.2f rad/s yaw_motor_velocity=%.3f rad/s "
                 "yaw_feedback_torque=%.3f yaw_error_flag=%d yaw_control=%s",
                 input.camera_z_m, vertical_error * 180.0 / M_PI,
                 input.pitch_rad * 180.0 / M_PI, docking_output_.pitch_rad * 180.0 / M_PI,
@@ -1307,6 +1506,7 @@ private:
                     ? "STOPPED for centering/new camera pose" : "extending burst with pitch held",
                 docking_output_.zipper_motor_velocity_rad_s,
                 yaw_input.camera_x_error_m, input.yaw_rad * 180.0 / M_PI, yaw_target * 180.0 / M_PI,
+                yaw_output.motor_velocity_rad_s,
                 turret_->GetYawMotorVelocity(), turret_->GetYawMotorTorque(),
                 turret_->GetYawMotorErrorFlag(), yaw_output.status.c_str());
         }
@@ -1332,9 +1532,56 @@ private:
             throw std::logic_error("Unexpected autonomous docking actuation");
         }
         const bool yaw_correction_active = yaw_input.allow_alignment && yaw_output.adjusting;
-        turret_->HoldYawPosition(yaw_target,
-            yaw_correction_active ? docking_yaw_correction_kp_ : docking_yaw_position_kp_,
-            yaw_correction_active ? docking_yaw_correction_kd_ : docking_yaw_position_kd_);
+        if (yaw_correction_active) {
+            // Match the working teleop velocity command, with a short monitored
+            // burst that brakes/holds before returning to the ROS callback.
+            const auto pulse_result = turret_->ActuateDockingYawVelocity(yaw_output.motor_velocity_rad_s, yaw_target,
+                yaw_output.velocity_pulse_sec, docking_yaw_position_kp_,
+                docking_yaw_position_kd_, docking_yaw_feedback_timeout_sec_,
+                docking_yaw_config_.target_deadband_rad);
+            if (!pulse_result.fresh_stopped_feedback ||
+                !turret_->HasFreshYawFeedback(std::min(docking_yaw_feedback_timeout_sec_, 0.005))) {
+                // The burst has already braked. Never apply a strong position
+                // hold using a cached angle after its CAN replies disappear.
+                beginYawCanFeedbackPause();
+                turret_->StopAllMotors();
+                reportYawCanFeedbackPause();
+                return;
+            }
+            validateYawMotorFeedback();
+            // The burst and braking hold both receive CAN replies. Observe
+            // the latest one now, rather than compare the next tick against
+            // the angle from before this intentional motor movement.
+            current_yaw_angle_ = turret_->GetYawAngle();
+            const auto post_pulse_input = dockingInput();
+            auto post_pulse_feedback = dockingYawFeedbackInput(post_pulse_input);
+            // Small valid recoil is ordinary position error toward this same
+            // fixed target. Only a large in-pulse discontinuity needs position
+            // confirmation; a brief CAN delay with a new stopped reply does not.
+            post_pulse_feedback.force_feedback_confirmation = pulse_result.position_discontinuity;
+            const auto feedback = docking_yaw_controller_->observeFeedback(post_pulse_feedback);
+            if (feedback.failed) throw std::runtime_error(feedback.status);
+            if (feedback.feedback_recovery_required) {
+                pauseDockingForYawFeedback(post_pulse_input, feedback);
+                return;
+            }
+            // Resume the working hold before any console output can delay it.
+            turret_->HoldYawPosition(post_pulse_input.yaw_rad,
+                docking_yaw_position_kp_, docking_yaw_position_kd_);
+            if (pulse_result.feedback_interrupted) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                    "Yaw pulse interrupted by CAN reply delay; new stopped feedback received; "
+                    "retaining the fixed correction target");
+            }
+            if (pulse_result.reverse_motion_rad > 0.5 * M_PI / 180.0) {
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                    "Yaw feedback moved backward %.2f deg during a pulse; "
+                    "continuing toward the same target %.2f deg",
+                    pulse_result.reverse_motion_rad * 180.0 / M_PI, yaw_target * 180.0 / M_PI);
+            }
+        } else {
+            turret_->HoldYawPosition(yaw_target, docking_yaw_position_kp_, docking_yaw_position_kd_);
+        }
         publishDockCommand(dock_command);
     }
 
@@ -1373,6 +1620,7 @@ private:
             return;
         }
         const bool yaw_feedback_fresh = refreshDockingYawFeedback();
+        if (!yaw_feedback_fresh) return;
         const auto input = dockingInput();
         undocking_output_ = undocking_controller_->update(input);
         const auto status = undocking_output_.phase == UndockingController::Phase::FAILED
@@ -1398,21 +1646,18 @@ private:
                 "zipper stopped while correcting pitch",
                 input.pitch_rad * 180.0 / M_PI, undocking_pitch_max_rad_ * 180.0 / M_PI);
         }
-        if (!yaw_feedback_fresh) {
-            throw std::runtime_error("No fresh yaw CAN feedback after stopped neutral queries; undocking motors stopped");
-        }
         if (std::fabs(undocking_output_.yaw_rad - input.yaw_rad) > 5.0 * M_PI / 180.0) {
             throw std::runtime_error("Yaw moved more than 5 degrees from the undocking hold reference; motors stopped");
         }
         if (undocking_output_.actuation == UndockingController::Actuation::RETRACT_HOLD_PITCH) {
             turret_->ActuateUndockingRetraction(undocking_output_.zipper_motor_velocity_rad_s,
                 undocking_output_.pitch_rad, undocking_output_.extension_m,
-                docking_max_pitch_motor_velocity_rad_s_, undocking_pitch_max_rad_);
+                undocking_max_pitch_motor_velocity_rad_s_, undocking_pitch_max_rad_);
         } else {
             // Port operations and the final READY posture keep the zipper stopped
             // while cable feedback maintains the requested joint angle.
             turret_->ActuateDockingPitch(undocking_output_.pitch_rad,
-                docking_max_pitch_motor_velocity_rad_s_);
+                undocking_max_pitch_motor_velocity_rad_s_);
         }
         turret_->HoldYawPosition(undocking_output_.yaw_rad,
             docking_yaw_position_kp_, docking_yaw_position_kd_);
@@ -1465,6 +1710,13 @@ private:
         docking_yaw_status_.clear();
         have_docking_output_ = false;
         docking_actuation_failed_ = false;
+        docking_yaw_feedback_paused_ = false;
+        docking_yaw_pause_pitch_rad_ = 0.0;
+        yaw_can_feedback_paused_ = false;
+        yaw_can_pause_sequence_ = 0;
+        yaw_can_pause_started_sec_ = 0.0;
+        yaw_can_paused_duration_sec_ = 0.0;
+        yaw_can_visual_resume_after_stamp_ns_ = 0;
         docking_last_update_sec_ = 0.0;
         docking_status_ = "Docking inactive";
     }
@@ -1475,6 +1727,11 @@ private:
         undocking_output_ = UndockingController::Output{};
         undocking_ready_hold_ = false;
         undocking_actuation_failed_ = false;
+        yaw_can_feedback_paused_ = false;
+        yaw_can_pause_sequence_ = 0;
+        yaw_can_pause_started_sec_ = 0.0;
+        yaw_can_paused_duration_sec_ = 0.0;
+        yaw_can_visual_resume_after_stamp_ns_ = 0;
         undocking_status_ = "Undocking inactive";
     }
     
@@ -1758,6 +2015,7 @@ private:
                 } else {
                     try {
                         auto settings = loadDockingConfig();
+                        turret_->ConfigureDockingPitchControl(docking_pitch_control_config_);
                         resetDockingState();
                         resetUndockingState();
                         releaseTeleopYawBrake();
@@ -1766,14 +2024,13 @@ private:
                         updateCurrentState();
                         // Use the existing zero -> READY prerequisite. Yaw corrections
                         // are relative to actual motor feedback, without a new zeroing gate.
-                        turret_->SetYawVelocity(0.0);
-                        if (!refreshDockingYawFeedback()) {
-                            throw std::runtime_error("Cannot read fresh yaw motor feedback for docking reference");
-                        }
+                        acquireDockingYawReference();
+                        receiveQueuedDockState();
                         docking_controller_ = std::make_unique<DockingController>(settings);
                         const auto initial_input = dockingInput();
                         docking_yaw_controller_ = std::make_unique<DockingYawController>(docking_yaw_config_);
-                        docking_yaw_controller_->start(initial_input.now_sec, initial_input.yaw_rad);
+                        docking_yaw_controller_->start(initial_input.now_sec, initial_input.yaw_rad,
+                            turret_->GetYawFeedbackSequence());
                         if (!initial_input.dock_fresh) {
                             throw std::runtime_error("No fresh state from the configured docking port");
                         }
@@ -1785,17 +2042,36 @@ private:
                         response->success = true;
                         response->message = "Docking started: find tag, center pitch, extend in bursts, activate/open dock at handoff, insert until contact";
                         RCLCPP_INFO(this->get_logger(),
-                            "Docking approach: burst=%.2f s zipper=%.2f rad/s centering=%.2f deg drift_stop=%.2f deg",
+                            "Docking approach: burst=%.2f s zipper=%.2f rad/s centering=%.2f deg drift_stop=%.2f deg "
+                            "pitch_target_rate_fine/coarse=%.1f/%.1f deg/s pitch_motor_fine/coarse=%.2f/%.2f rad/s",
                             settings.approach_burst_duration_sec, settings.zipper_motor_velocity_rad_s,
                             settings.centering_start_tolerance_rad * 180.0 / M_PI,
-                            settings.centering_stop_tolerance_rad * 180.0 / M_PI);
+                            settings.centering_stop_tolerance_rad * 180.0 / M_PI,
+                            settings.fine_pitch_rate_rad_s * 180.0 / M_PI,
+                            settings.max_pitch_rate_rad_s * 180.0 / M_PI,
+                            docking_pitch_control_config_.fine_velocity_rad_s,
+                            docking_max_pitch_motor_velocity_rad_s_);
                         RCLCPP_INFO(this->get_logger(),
-                            "Docking yaw POSITION: reference=%.2f deg step_max=%.2f deg timeout=%.2f s "
-                            "correction_kp=%.1f correction_kd=%.1f hold_kp=%.1f hold_kd=%.1f; separate yaw zero not required",
+                            "Docking yaw VELOCITY: reference=%.2f deg step_max=%.2f deg timeout=%.2f s "
+                            "motor_velocity=%.2f rad/s pulse_max=%.0f ms hold_kp=%.1f hold_kd=%.1f "
+                            "lateral_deadband=%.3f m lateral_resume=%.3f m; "
+                            "no start-relative yaw travel limit; separate yaw zero not required",
                             initial_input.yaw_rad * 180.0 / M_PI, docking_yaw_config_.step_rad * 180.0 / M_PI,
                             docking_yaw_config_.adjustment_timeout_sec,
-                            docking_yaw_correction_kp_, docking_yaw_correction_kd_,
-                            docking_yaw_position_kp_, docking_yaw_position_kd_);
+                            docking_yaw_config_.motor_velocity_rad_s, docking_yaw_config_.velocity_pulse_sec * 1000.0,
+                            docking_yaw_position_kp_, docking_yaw_position_kd_, settings.lateral_deadband_m,
+                            docking_yaw_config_.camera_lateral_resume_m);
+                        RCLCPP_INFO(this->get_logger(),
+                            "Docking near approach: slowdown %.3f -> %.3f m zipper=%.2f rad/s burst=%.2f s "
+                            "pitch_scale=%.2f yaw_step=%.2f deg yaw_pulse=%.1f ms yaw_stop/resume=%.3f/%.3f m; "
+                            "pitch-limit approach window=%.3f m",
+                            settings.approach_profile.slowdown_start_m, settings.approach_profile.slowdown_end_m,
+                            settings.near_zipper_motor_velocity_rad_s, settings.near_approach_burst_duration_sec,
+                            settings.near_pitch_scale, docking_yaw_config_.near_step_rad * 180.0 / M_PI,
+                            docking_yaw_config_.near_velocity_pulse_sec * 1000.0,
+                            docking_yaw_config_.near_camera_lateral_deadband_m,
+                            docking_yaw_config_.near_camera_lateral_resume_m,
+                            settings.pitch_limit_approach_window_m);
                         executeAutonomousDockingCommand();
                     } catch (const std::exception& e) {
                         turret_->StopAllMotors();
@@ -1814,6 +2090,7 @@ private:
                 } else {
                     try {
                         loadDockingConfig(); // Shared motor gains and feedback freshness.
+                        turret_->ConfigureDockingPitchControl(docking_pitch_control_config_);
                         const auto settings = loadUndockingConfig();
                         resetDockingState();
                         resetUndockingState();
@@ -1822,10 +2099,8 @@ private:
                         turret_->EnableControlMotors();
                         turret_->UpdateEncoders();
                         updateCurrentState();
-                        turret_->SetYawVelocity(0.0);
-                        if (!refreshDockingYawFeedback()) {
-                            throw std::runtime_error("Cannot read fresh yaw motor feedback for undocking reference");
-                        }
+                        acquireDockingYawReference();
+                        receiveQueuedDockState();
                         const auto initial_input = dockingInput();
                         if (!initial_input.dock_fresh) {
                             throw std::runtime_error("No fresh state from the configured docking port");
@@ -1840,12 +2115,15 @@ private:
                         response->message = "Undocking started: power-cycle/open latch, slow clearance, retract to READY posture";
                         RCLCPP_INFO(this->get_logger(),
                             "Undocking armed: start_ext=%.3f m slow_clearance=%.3f m slow_vel=%.2f rad/s "
-                            "fast_vel=%.2f rad/s hold_pitch_until_ext=%.3f m pitch_max=%.1f deg "
-                            "target_ext=%.3f m target_pitch=%.1f deg",
+                            "fast_vel=%.2f rad/s hold_pitch_until_ext=%.3f m cruise_pitch=%.1f deg pitch_max=%.1f deg "
+                            "target_ext=%.3f m target_pitch=%.1f deg pitch_motor_fine/coarse=%.2f/%.2f rad/s",
                             initial_input.extension_m, settings.slow_clearance_m,
                             settings.slow_velocity_rad_s, settings.fast_velocity_rad_s,
-                            settings.intermediate_extension_m, settings.pitch_max_rad * 180.0 / M_PI,
-                            settings.target_extension_m, settings.target_pitch_rad * 180.0 / M_PI);
+                            settings.intermediate_extension_m, settings.cruise_pitch_rad * 180.0 / M_PI,
+                            settings.pitch_max_rad * 180.0 / M_PI,
+                            settings.target_extension_m, settings.target_pitch_rad * 180.0 / M_PI,
+                            docking_pitch_control_config_.fine_velocity_rad_s,
+                            undocking_max_pitch_motor_velocity_rad_s_);
                         executeAutonomousUndockingCommand();
                     } catch (const std::exception& e) {
                         turret_->StopAllMotors();
@@ -1974,18 +2252,6 @@ private:
 // Its implementation is in load_cell_ros2_node.cpp (linked into this executable).
 #include "load_cell_node.h"
 
-// Signal handler – just requests ROS shutdown; node destructors handle cleanup
-static std::weak_ptr<TurretROS2Node> g_turret_node;
-
-void signalHandler(int /*signum*/)
-{
-    std::cout << "\nShutdown signal received – stopping..." << std::endl;
-    if (auto turret_node = g_turret_node.lock()) {
-        turret_node->emergencyStop();
-    }
-    rclcpp::shutdown();
-}
-
 int main(int argc, char* argv[])
 {
     rclcpp::init(argc, argv);
@@ -1997,9 +2263,13 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // Register signal handlers after pigpio (which installs its own handlers)
-    signal(SIGINT, signalHandler);
-    signal(SIGTERM, signalHandler);
+    // pigpio replaces the handlers installed by rclcpp::init. Uninstalling
+    // restores ROS's original saved handlers before installing its deferred
+    // handling again, so it does not chain to pigpio's immediate-exit handler.
+    // Hardware cleanup then runs normally after executor.spin(), never from
+    // a signal interrupting a thread that already holds the CAN mutex.
+    rclcpp::uninstall_signal_handlers();
+    rclcpp::install_signal_handlers(rclcpp::SignalHandlerOptions::All);
 
     try {
         // LoadCellNode is created FIRST so the HX711 chips initialise in a clean
@@ -2009,7 +2279,6 @@ int main(int argc, char* argv[])
         // affects GPIO initialisation, not runtime behaviour.
         auto load_cell_node = std::make_shared<LoadCellNode>();
         auto turret_node = std::make_shared<TurretROS2Node>();
-        g_turret_node = turret_node;
 
         RCLCPP_INFO(turret_node->get_logger(),
             "Both nodes created - starting MultiThreadedExecutor");

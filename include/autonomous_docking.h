@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <string>
 
+#include "docking_approach_profile.h"
+
 namespace turret_control {
 
 // The caller supplies fresh camera coordinates and dock feedback. This
@@ -28,35 +30,53 @@ class AutonomousDockingController {
     double insertion_distance_m = 0.20;
     // Retained for parameter compatibility; lateral error no longer gates
     // the distance-triggered handoff. Yaw uses lateral_deadband_m on approach.
-    double lateral_tolerance_m = 0.015;
-    double lateral_deadband_m = 0.005;
+    double lateral_tolerance_m = 0.030;
+    double lateral_deadband_m = 0.030;
     // Angular thresholds keep the tag near the image center at any distance.
-    // Resume extension inside 1 degree; stop/re-center beyond 4 degrees.
-    double centering_start_tolerance_rad = 1.0 * kRadiansPerDegree;
+    // Accept 2 degrees of camera centering error before extending. Capture
+    // measured pitch for the hold; stop/re-center beyond 4 degrees of drift.
+    double centering_start_tolerance_rad = 2.0 * kRadiansPerDegree;
     double centering_stop_tolerance_rad = 4.0 * kRadiansPerDegree;
     double depth_deadband_m = 0.005;
     double pitch_min_rad = 0.0;
-    double pitch_max_rad = 63.0 * kRadiansPerDegree;
-    double yaw_limit_from_start_rad = 30.0 * kRadiansPerDegree;
+    double pitch_max_rad = 70.0 * kRadiansPerDegree;
     double pitch_down_sign = 1.0;
     // A positive sign increases motor yaw for positive camera x error.
     double yaw_correction_sign = 1.0;
     double pitch_gain_rad_per_m = 10.0;
     double yaw_gain = 1.5;
-    double max_pitch_rate_rad_s = 5.0 * kRadiansPerDegree;
+    double max_pitch_rate_rad_s = 15.0 * kRadiansPerDegree;
     double max_yaw_rate_rad_s = 5.0 * kRadiansPerDegree;
-    double max_pitch_step_rad = 2.0 * kRadiansPerDegree;
-    double max_yaw_step_rad = 1.0 * kRadiansPerDegree;
+    double max_pitch_step_rad = 6.0 * kRadiansPerDegree;
+    // Small camera errors use slower targets and less lead over measured
+    // pitch. Blend smoothly to the coarse limits as alignment error grows.
+    double fine_pitch_rate_rad_s = 5.0 * kRadiansPerDegree;
+    double fine_pitch_step_rad = 2.0 * kRadiansPerDegree;
+    double pitch_fine_error_rad = 3.0 * kRadiansPerDegree;
+    double pitch_coarse_error_rad = 8.0 * kRadiansPerDegree;
+    double max_yaw_step_rad = 3.0 * kRadiansPerDegree;
     double max_dt_sec = 0.1;
     double extension_min_m = 0.0;
     double extension_max_m = 0.90;
     double search_pitch_span_rad = 63.0 * kRadiansPerDegree;
-    double search_pitch_rate_rad_s = 5.0 * kRadiansPerDegree;
+    double search_pitch_rate_rad_s = 15.0 * kRadiansPerDegree;
     // Zipper motor angular speed, not Cartesian extension speed. The physical
     // zipper needs at least 1.2 rad/s to move. Approach uses short bursts at
     // this actual motor velocity, followed by a stopped camera/pitch check.
-    double zipper_motor_velocity_rad_s = 1.2;
+    double zipper_motor_velocity_rad_s = 1.5;
     double approach_burst_duration_sec = 2.0;
+    // Keep the motor above its measured movement floor, reducing the amount
+    // of travel between stopped camera checks as the tag approaches the dock.
+    DockingApproachProfile approach_profile;
+    double near_zipper_motor_velocity_rad_s = 1.2;
+    double near_approach_burst_duration_sec = 0.5;
+    double near_pitch_scale = 0.5;
+    // Near the dock, a small remaining image error may ask for pitch beyond
+    // a physical limit. A short observed extension may close that last gap
+    // while the measured, bounded pitch remains held.
+    double pitch_limit_approach_window_m = 0.25;
+    double pitch_limit_margin_rad = 1.0 * kRadiansPerDegree;
+    double pitch_limit_max_vertical_error_rad = 6.0 * kRadiansPerDegree;
     // Power/open the port only at the camera handoff, with the zipper stopped.
     // These waits cover the port's servo initialization/opening operations.
     double dock_activate_settle_sec = 2.0;
@@ -71,7 +91,7 @@ class AutonomousDockingController {
     int dock_retry_attempts = 4;
     // Insertion holds the measured pitch and yaw at handoff. It intentionally
     // has no travel or time cutoff: fresh push-button contact ends insertion.
-    double insertion_velocity_rad_s = 1.2;
+    double insertion_velocity_rad_s = 1.4;
     double latch_timeout_sec = 8.0;
     double latch_close_settle_sec = 1.0;
     int latch_closed_pulse_width_us = 1000;
@@ -126,10 +146,11 @@ class AutonomousDockingController {
     output_ = Output{};
     phase_ = Phase::IDLE;
     last_time_sec_ = phase_start_sec_ = 0.0;
-    start_yaw_rad_ = hold_pitch_rad_ = hold_yaw_rad_ = 0.0;
+    hold_pitch_rad_ = hold_yaw_rad_ = 0.0;
     search_pitch_goal_rad_ = 0.0;
     center_after_stamp_ns_ = 0;
     waiting_for_center_capture_ = false;
+    pitch_limit_approach_active_ = false;
     dock_settle_sequence_ = 0;
     waiting_for_dock_state_after_settle_ = false;
     recovery_state_sequence_ = 0;
@@ -169,7 +190,7 @@ class AutonomousDockingController {
            "; release the button and open the latch before starting a new attempt");
       return;
     }
-    start_yaw_rad_ = hold_yaw_rad_ = input.yaw_rad;
+    hold_yaw_rad_ = input.yaw_rad;
     search_pitch_goal_rad_ = clampPitch(input.pitch_rad +
         config_.pitch_down_sign * config_.search_pitch_span_rad);
     enter(Phase::SEARCH, input.now_sec, "Searching for AprilTag with pitch down; extension held");
@@ -344,7 +365,7 @@ class AutonomousDockingController {
       // pose still looks centered. The next decision needs a capture made
       // after this stop, not another publication of the cached transform.
       freeze(input);
-      hold_pitch_rad_ = input.pitch_rad;
+      hold_pitch_rad_ = clampPitch(input.pitch_rad);
       hold_yaw_rad_ = input.yaw_rad;
       center_after_stamp_ns_ = input.camera_now_ns;
       waiting_for_center_capture_ = true;
@@ -353,6 +374,7 @@ class AutonomousDockingController {
     }
 
     const double vertical_angle = std::fabs(verticalAngle(input));
+    const bool pitch_limited_approach = canApproachAtPitchLimit(input);
     if (needsPitchCentering(input)) {
       // Stop the zipper directly: clearing its future position target alone
       // does not cancel the low-level extension trajectory immediately.
@@ -366,18 +388,35 @@ class AutonomousDockingController {
         }
         waiting_for_center_capture_ = false;
       }
-      if (vertical_angle > config_.centering_start_tolerance_rad) {
+      if (vertical_angle > config_.centering_start_tolerance_rad && !pitch_limited_approach) {
         return centerPitch(input, dt);
       }
       freeze(input);
-      hold_pitch_rad_ = input.pitch_rad;
-      enter(Phase::APPROACH, input.now_sec, "Tag centered; extending for a short burst while holding pitch");
+      hold_pitch_rad_ = clampPitch(input.pitch_rad);
+      pitch_limit_approach_active_ = pitch_limited_approach;
+      enter(Phase::APPROACH, input.now_sec, pitch_limited_approach
+          ? "Near dock at pitch limit; extending in a short slow burst with bounded pitch held"
+          : "Tag centered; extending for a short burst while holding pitch");
+    } else if (pitch_limited_approach && !pitch_limit_approach_active_) {
+      // A moving burst can reach the limit before its next stopped pitch
+      // check. Hold this measured angle, rather than an old approach angle.
+      hold_pitch_rad_ = output_.pitch_rad = clampPitch(input.pitch_rad);
+      pitch_limit_approach_active_ = true;
+      output_.status = "Near dock at pitch limit; extending in a short slow burst with bounded pitch held";
     }
 
     return trackApproach(input, dt);
   }
 
   Phase phase() const { return phase_; }
+
+  // After yaw feedback has been confirmed, use its measured heading for
+  // stationary/search/insertion holds instead of pulling to a stale target.
+  bool resynchronizeYawHold(double confirmed_yaw_rad) {
+    if (!finite(confirmed_yaw_rad)) return false;
+    output_.yaw_rad = hold_yaw_rad_ = confirmed_yaw_rad;
+    return true;
+  }
 
   // A stopped burst must first receive a capture made after the stop. Holding
   // its old yaw setpoint during that wait is not a new alignment request.
@@ -404,7 +443,10 @@ class AutonomousDockingController {
         atInsertionDistance(input.camera_z_m)) {
       return false;
     }
-    return std::fabs(verticalAngle(input)) > config_.centering_stop_tolerance_rad;
+    if (canApproachAtPitchLimit(input)) return false;
+    const double tolerance = pitch_limit_approach_active_
+        ? config_.centering_start_tolerance_rad : config_.centering_stop_tolerance_rad;
+    return std::fabs(verticalAngle(input)) > tolerance;
   }
 
   // Stop a burst or react to approach bounds/handoff in the fast hardware loop,
@@ -423,12 +465,12 @@ class AutonomousDockingController {
   Output output_;
   double last_time_sec_ = 0.0;
   double phase_start_sec_ = 0.0;
-  double start_yaw_rad_ = 0.0;
   double hold_pitch_rad_ = 0.0;
   double hold_yaw_rad_ = 0.0;
   double search_pitch_goal_rad_ = 0.0;
   std::int64_t center_after_stamp_ns_ = 0;
   bool waiting_for_center_capture_ = false;
+  bool pitch_limit_approach_active_ = false;
   std::uint64_t dock_settle_sequence_ = 0;
   bool waiting_for_dock_state_after_settle_ = false;
   std::uint64_t recovery_state_sequence_ = 0;
@@ -448,14 +490,19 @@ class AutonomousDockingController {
     };
     for (double value : finite_values) if (!finite(value)) return false;
     const double positive_values[] = {
-      config_.insertion_distance_m, config_.yaw_limit_from_start_rad,
+      config_.insertion_distance_m,
       config_.max_pitch_rate_rad_s, config_.max_yaw_rate_rad_s,
       config_.max_pitch_step_rad, config_.max_yaw_step_rad, config_.max_dt_sec,
+      config_.fine_pitch_rate_rad_s, config_.fine_pitch_step_rad,
+      config_.pitch_fine_error_rad, config_.pitch_coarse_error_rad,
       config_.search_pitch_span_rad, config_.search_pitch_rate_rad_s,
       config_.zipper_motor_velocity_rad_s, config_.insertion_velocity_rad_s,
       config_.latch_timeout_sec, config_.centering_start_tolerance_rad,
       config_.centering_stop_tolerance_rad, config_.approach_burst_duration_sec,
-      config_.dock_prepare_timeout_sec
+      config_.dock_prepare_timeout_sec, config_.near_zipper_motor_velocity_rad_s,
+      config_.near_approach_burst_duration_sec, config_.near_pitch_scale,
+      config_.pitch_limit_approach_window_m, config_.pitch_limit_margin_rad,
+      config_.pitch_limit_max_vertical_error_rad
     };
     for (double value : positive_values) if (!positive(value)) return false;
     const double nonnegative_values[] = {
@@ -466,11 +513,24 @@ class AutonomousDockingController {
       config_.dock_command_interval_sec
     };
     for (double value : nonnegative_values) if (!nonnegative(value)) return false;
-    return (config_.pitch_down_sign == -1.0 || config_.pitch_down_sign == 1.0) &&
+    return config_.approach_profile.valid() &&
+        config_.near_zipper_motor_velocity_rad_s >= 1.2 &&
+        config_.near_zipper_motor_velocity_rad_s <= config_.zipper_motor_velocity_rad_s &&
+        config_.near_approach_burst_duration_sec <= config_.approach_burst_duration_sec &&
+        config_.near_pitch_scale <= 1.0 &&
+        config_.pitch_limit_approach_window_m > config_.insertion_distance_m + config_.depth_deadband_m &&
+        config_.pitch_limit_margin_rad < config_.pitch_max_rad - config_.pitch_min_rad &&
+        config_.pitch_limit_max_vertical_error_rad > config_.centering_start_tolerance_rad &&
+        config_.pitch_limit_max_vertical_error_rad < 90.0 * kRadiansPerDegree &&
+        (config_.pitch_down_sign == -1.0 || config_.pitch_down_sign == 1.0) &&
         (config_.yaw_correction_sign == -1.0 || config_.yaw_correction_sign == 1.0) &&
         config_.pitch_min_rad < config_.pitch_max_rad &&
         config_.extension_min_m >= 0.0 && config_.extension_min_m < config_.extension_max_m &&
         config_.lateral_deadband_m <= config_.lateral_tolerance_m &&
+        config_.fine_pitch_rate_rad_s <= config_.max_pitch_rate_rad_s &&
+        config_.fine_pitch_step_rad <= config_.max_pitch_step_rad &&
+        config_.pitch_fine_error_rad > config_.centering_start_tolerance_rad &&
+        config_.pitch_coarse_error_rad > config_.pitch_fine_error_rad &&
         config_.centering_start_tolerance_rad < config_.centering_stop_tolerance_rad &&
         config_.centering_stop_tolerance_rad < 90.0 * kRadiansPerDegree &&
         config_.dock_retry_attempts >= 0 &&
@@ -491,11 +551,6 @@ class AutonomousDockingController {
     return std::clamp(pitch, config_.pitch_min_rad, config_.pitch_max_rad);
   }
 
-  double clampYaw(double yaw) const {
-    return std::clamp(yaw, start_yaw_rad_ - config_.yaw_limit_from_start_rad,
-                      start_yaw_rad_ + config_.yaw_limit_from_start_rad);
-  }
-
   static double boundedStep(double current, double goal, double maximum_step) {
     return current + std::clamp(goal - current, -maximum_step, maximum_step);
   }
@@ -508,6 +563,7 @@ class AutonomousDockingController {
 
   void enter(Phase phase, double now, const std::string& status) {
     phase_ = output_.phase = phase;
+    if (phase != Phase::APPROACH) pitch_limit_approach_active_ = false;
     phase_start_sec_ = now;
     output_.status = status;
   }
@@ -533,8 +589,27 @@ class AutonomousDockingController {
     return camera_z_m <= config_.insertion_distance_m + config_.depth_deadband_m;
   }
 
+  bool canApproachAtPitchLimit(const Input& input) const {
+    if (!input.pose_fresh || !finite(input.camera_y_m) || !positive(input.camera_z_m) ||
+        input.camera_z_m > config_.pitch_limit_approach_window_m) {
+      return false;
+    }
+    const double angle = verticalAngle(input);
+    if (std::fabs(angle) > config_.pitch_limit_max_vertical_error_rad) return false;
+    return (angle > 0.0 && input.pitch_rad >= config_.pitch_max_rad - config_.pitch_limit_margin_rad) ||
+        (angle < 0.0 && input.pitch_rad <= config_.pitch_min_rad + config_.pitch_limit_margin_rad);
+  }
+
+  double approachPitchScale(const Input& input) const {
+    return config_.approach_profile.interpolate(1.0, config_.near_pitch_scale, input.camera_z_m);
+  }
+
   bool burstExpired(const Input& input) const {
-    return input.now_sec - phase_start_sec_ >= config_.approach_burst_duration_sec;
+    const double duration = pitch_limit_approach_active_
+        ? config_.near_approach_burst_duration_sec
+        : config_.approach_profile.interpolate(config_.approach_burst_duration_sec,
+            config_.near_approach_burst_duration_sec, input.camera_z_m);
+    return input.now_sec - phase_start_sec_ >= duration;
   }
 
   void holdForDock(const Input& input) {
@@ -691,17 +766,20 @@ class AutonomousDockingController {
   }
 
   Output track(const Input& input, double dt, double pitch_goal,
-               double yaw_goal, double pitch_rate) {
+               double yaw_goal, double pitch_rate, double pitch_lead_rad = 0.0) {
     output_.actuation = Actuation::TRACK_POSE;
     // Integrate targets so small 100 Hz increments cross actuator deadbands.
     // Limit the lead over measured joints so a blocked motor cannot accumulate
     // a large future movement when it becomes free.
+    const double pitch_lead = pitch_lead_rad > 0.0
+        ? std::min(pitch_lead_rad, config_.max_pitch_step_rad)
+        : config_.max_pitch_step_rad;
     output_.extension_m = input.extension_m;
-    output_.pitch_rad = std::clamp(boundedStep(output_.pitch_rad, clampPitch(pitch_goal),
-        std::min(config_.max_pitch_step_rad, std::min(pitch_rate, config_.max_pitch_rate_rad_s) * dt)),
-        input.pitch_rad - config_.max_pitch_step_rad,
-        input.pitch_rad + config_.max_pitch_step_rad);
-    output_.yaw_rad = std::clamp(boundedStep(output_.yaw_rad, clampYaw(yaw_goal),
+    output_.pitch_rad = clampPitch(std::clamp(
+        boundedStep(output_.pitch_rad, clampPitch(pitch_goal),
+            std::min(pitch_lead, std::min(pitch_rate, config_.max_pitch_rate_rad_s) * dt)),
+        input.pitch_rad - pitch_lead, input.pitch_rad + pitch_lead));
+    output_.yaw_rad = std::clamp(boundedStep(output_.yaw_rad, yaw_goal,
         std::min(config_.max_yaw_step_rad, config_.max_yaw_rate_rad_s * dt)),
         input.yaw_rad - config_.max_yaw_step_rad,
         input.yaw_rad + config_.max_yaw_step_rad);
@@ -718,12 +796,35 @@ class AutonomousDockingController {
   }
 
   Output centerPitch(const Input& input, double dt) {
+    const double camera_angle = verticalAngle(input);
+    const double blend_position = std::clamp(
+        (std::fabs(camera_angle) - config_.pitch_fine_error_rad) /
+            (config_.pitch_coarse_error_rad - config_.pitch_fine_error_rad),
+        0.0, 1.0);
+    const double blend = blend_position * blend_position * (3.0 - 2.0 * blend_position);
+    const double distance_scale = approachPitchScale(input);
+    const double nominal_rate_limit = config_.fine_pitch_rate_rad_s + blend *
+        (config_.max_pitch_rate_rad_s - config_.fine_pitch_rate_rad_s);
+    const double rate_limit = nominal_rate_limit * distance_scale;
+    const double pitch_lead = (config_.fine_pitch_step_rad + blend *
+        (config_.max_pitch_step_rad - config_.fine_pitch_step_rad)) * distance_scale;
     const double pitch_rate = std::clamp(config_.pitch_gain_rad_per_m *
         (config_.goal_camera_y_m - input.camera_y_m),
-        -config_.max_pitch_rate_rad_s, config_.max_pitch_rate_rad_s);
+        -nominal_rate_limit, nominal_rate_limit) * distance_scale;
+    // Keep the existing metric gain/sign while limiting targets to the
+    // remaining angular correction in the current image. A changed capture
+    // can remove a stale lead or reverse correction without commanding the
+    // old integrated target farther in the wrong direction.
+    const double camera_goal = clampPitch(input.pitch_rad +
+        std::clamp(camera_angle, -pitch_lead, pitch_lead));
+    const double goal_min = std::min(input.pitch_rad, camera_goal);
+    const double goal_max = std::max(input.pitch_rad, camera_goal);
+    output_.pitch_rad = std::clamp(output_.pitch_rad, goal_min, goal_max);
+    const double pitch_goal = std::clamp(output_.pitch_rad + pitch_rate * dt,
+                                        goal_min, goal_max);
     output_.extension_m = input.extension_m;
-    track(input, dt, output_.pitch_rad + pitch_rate * dt,
-          output_.yaw_rad + yawRate(input) * dt, config_.max_pitch_rate_rad_s);
+    track(input, dt, pitch_goal,
+          output_.yaw_rad + yawRate(input) * dt, rate_limit, pitch_lead);
     output_.actuation = Actuation::CENTER_PITCH;
     output_.zipper_motor_velocity_rad_s = 0.0;
     return output_;
@@ -742,9 +843,13 @@ class AutonomousDockingController {
     // Hold the measured pitch captured when centering completed. Correct yaw
     // during extension; another pitch correction first stops the zipper.
     track(input, dt, hold_pitch_rad_,
-          output_.yaw_rad + yawRate(input) * dt, config_.max_pitch_rate_rad_s);
+          output_.yaw_rad + yawRate(input) * dt,
+          config_.max_pitch_rate_rad_s * approachPitchScale(input));
     output_.actuation = Actuation::EXTEND_HOLD_PITCH;
-    output_.zipper_motor_velocity_rad_s = config_.zipper_motor_velocity_rad_s;
+    output_.zipper_motor_velocity_rad_s = pitch_limit_approach_active_
+        ? config_.near_zipper_motor_velocity_rad_s
+        : config_.approach_profile.interpolate(config_.zipper_motor_velocity_rad_s,
+            config_.near_zipper_motor_velocity_rad_s, input.camera_z_m);
     return output_;
   }
 };

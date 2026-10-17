@@ -176,6 +176,9 @@ void testProductionCommandDwellBeforeUndocking() {
   CHECK(near(harness.config.dock_deactivate_settle_sec, 2.0));
   CHECK(near(harness.config.dock_activate_settle_sec, 2.0));
   CHECK(near(harness.config.dock_open_settle_sec, 1.0));
+  CHECK(near(harness.config.slow_clearance_m, 0.10));
+  CHECK(near(harness.config.fast_velocity_rad_s, 2.0));
+  CHECK(near(harness.config.cruise_pitch_rad, 60.0 * kDeg));
   harness.begin();
   const double deactivated_sec = harness.input.now_sec;
   harness.deactivateToActivate();
@@ -206,39 +209,39 @@ void testUndockingCommandsAndRetryStaySpaced() {
   waitForSpacedCommand(harness, Phase::DOCK_OPEN, DockCommand::OPEN_LATCH,
                       harness.initial_pitch, last_command_sec);
   CHECK(harness.openToMotion().phase == Phase::SLOW_RETRACT);
-  harness.input.extension_m = 0.46;
+  harness.input.extension_m = 0.51;
   harness.input.dock_latch_open = false;
   CHECK(harness.step(0.01).phase == Phase::DOCK_RECOVER);
   output = harness.step(0.01, true);
   CHECK(output.phase == Phase::DOCK_DEACTIVATE && output.dock_command == DockCommand::NONE);
   CHECK(output.dock_retry_attempt == 1);
 
-  // A residual encoder movement may reach 15 cm while IDLE is delayed. The
-  // measured pitch from that crossing must survive the entire queued retry.
-  harness.input.extension_m = 0.45;
+  // A residual encoder movement may reach 10 cm while IDLE is delayed. The
+  // fixed cruise pitch from that crossing must survive the entire queued retry.
+  harness.input.extension_m = 0.50;
   harness.input.pitch_rad = 58.0 * kDeg;
   output = harness.step(0.01);
   CHECK(output.phase == Phase::DOCK_DEACTIVATE && output.dock_command == DockCommand::NONE);
-  checkHold(output, 58.0 * kDeg, harness.initial_yaw);
+  checkHold(output, 60.0 * kDeg, harness.initial_yaw);
   harness.input.pitch_rad = 59.0 * kDeg;
   output = waitForSpacedCommand(harness, Phase::DOCK_DEACTIVATE, DockCommand::IDLE,
-                               58.0 * kDeg, last_command_sec);
+                               60.0 * kDeg, last_command_sec);
   CHECK(output.dock_retry_attempt == 1);
   harness.idlePort();
   output = acknowledgeAfterSettle(harness, config.dock_deactivate_settle_sec);
   CHECK(output.phase == Phase::DOCK_ACTIVATE && output.dock_command == DockCommand::NONE);
   waitForSpacedCommand(harness, Phase::DOCK_ACTIVATE, DockCommand::ACTIVATE,
-                      58.0 * kDeg, last_command_sec);
+                      60.0 * kDeg, last_command_sec);
   harness.input.dock_idle = false;
   harness.input.dock_active = harness.input.dock_relay_active = true;
   output = acknowledgeAfterSettle(harness, config.dock_activate_settle_sec);
   CHECK(output.phase == Phase::DOCK_OPEN && output.dock_command == DockCommand::NONE);
   waitForSpacedCommand(harness, Phase::DOCK_OPEN, DockCommand::OPEN_LATCH,
-                      58.0 * kDeg, last_command_sec);
+                      60.0 * kDeg, last_command_sec);
   output = harness.openToMotion();
   CHECK(output.phase == Phase::FAST_RETRACT);
-  CHECK(near(output.pitch_rad, 58.0 * kDeg));
-  CHECK(near(output.zipper_motor_velocity_rad_s, -1.8));
+  CHECK(near(output.pitch_rad, 60.0 * kDeg));
+  CHECK(near(output.zipper_motor_velocity_rad_s, -2.0));
   CHECK(output.dock_retry_attempt == 1);
 }
 
@@ -310,7 +313,7 @@ void testCommandOrderAndHeldButton() {
   CHECK(output.actuation == Actuation::RETRACT_HOLD_PITCH);
   CHECK(near(output.zipper_motor_velocity_rad_s, -1.2));
   CHECK(near(output.pitch_rad, harness.initial_pitch));
-  CHECK(near(output.extension_m, 0.45));
+  CHECK(near(output.extension_m, 0.50));
   CHECK(harness.input.dock_detected && !harness.input.dock_unoccupied);
   CHECK(harness.step().dock_command == DockCommand::NONE);
 }
@@ -318,28 +321,29 @@ void testCommandOrderAndHeldButton() {
 void testMeasuredClearanceAndFinalPose() {
   Harness harness;
   harness.motion();
-  // Elapsed time does not finish the initial 15 cm clearance retraction.
+  // Elapsed time does not finish the initial 10 cm clearance retraction.
   auto output = harness.step(300.0);
   CHECK(output.phase == Phase::SLOW_RETRACT);
   CHECK(near(output.pitch_rad, harness.initial_pitch));
-  harness.input.extension_m = 0.451;
+  harness.input.extension_m = 0.500001;
+  harness.input.pitch_rad = 58.0 * kDeg;
   output = harness.step();
   CHECK(output.phase == Phase::SLOW_RETRACT);
+  CHECK(near(output.pitch_rad, harness.initial_pitch));
   CHECK(near(output.zipper_motor_velocity_rad_s, -1.2));
-  // Capture the measured docking pitch once the physical 15 cm retreat ends.
-  harness.input.pitch_rad = 58.0 * kDeg;
-  harness.input.extension_m = 0.45;
+  // Exactly 10 cm of measured retreat switches to the configured cruise pitch.
+  harness.input.extension_m = 0.50;
   output = harness.step();
   CHECK(output.phase == Phase::FAST_RETRACT);
-  CHECK(near(output.zipper_motor_velocity_rad_s, -1.8));
-  CHECK(near(output.pitch_rad, 58.0 * kDeg));
+  CHECK(near(output.zipper_motor_velocity_rad_s, -2.0));
+  CHECK(near(output.pitch_rad, 60.0 * kDeg));
   CHECK(near(output.yaw_rad, harness.initial_yaw));
-  // Measurements may drift, but the captured pitch must not become a moving target.
-  harness.input.pitch_rad = 59.0 * kDeg;
+  // Measurements may drift, but the cruise pitch must not become a moving target.
+  harness.input.pitch_rad = 61.0 * kDeg;
   harness.input.extension_m = 0.40;
   output = harness.step();
   CHECK(output.phase == Phase::FAST_RETRACT);
-  CHECK(near(output.pitch_rad, 58.0 * kDeg));
+  CHECK(near(output.pitch_rad, 60.0 * kDeg));
   harness.input.extension_m = 0.306;
   CHECK(harness.step().phase == Phase::FAST_RETRACT);
   harness.input.extension_m = 0.304;
@@ -347,7 +351,7 @@ void testMeasuredClearanceAndFinalPose() {
   CHECK(output.phase == Phase::STOW_RETRACT);
   CHECK(output.actuation == Actuation::RETRACT_HOLD_PITCH);
   CHECK(near(output.pitch_rad, 20.0 * kDeg));
-  CHECK(near(output.zipper_motor_velocity_rad_s, -1.8));
+  CHECK(near(output.zipper_motor_velocity_rad_s, -2.0));
   harness.input.extension_m = 0.106;
   CHECK(harness.step().phase == Phase::STOW_RETRACT);
   harness.input.extension_m = 0.104;
@@ -377,23 +381,23 @@ void testShortStartingExtensionNeverExtendsOrOverRetracts() {
     Harness harness({}, extension);
     auto output = harness.motion();
     CHECK(output.phase == Phase::SLOW_RETRACT);
-    harness.input.extension_m = extension - 0.149;
+    harness.input.extension_m = extension - 0.099;
     output = harness.step();
     CHECK(output.phase == Phase::SLOW_RETRACT);
     CHECK(near(output.pitch_rad, harness.initial_pitch));
-    harness.input.extension_m = extension - 0.15;
+    harness.input.extension_m = extension - 0.10;
     output = harness.step();
     CHECK(output.phase == Phase::STOW_RETRACT);
     CHECK(near(output.pitch_rad, 20.0 * kDeg));
-    CHECK(near(output.zipper_motor_velocity_rad_s, -1.8));
+    CHECK(near(output.zipper_motor_velocity_rad_s, -2.0));
     CHECK(near(output.extension_m, 0.10));
     harness.input.extension_m = 0.104;
     output = harness.step();
     CHECK(output.phase == Phase::FINAL_PITCH);
     CHECK(near(output.zipper_motor_velocity_rad_s, 0.0));
   }
-  // With less than 15 cm available, the entire retreat stays slow to the final floor.
-  for (double extension : {0.19, 0.24}) {
+  // With less than 10 cm available, the entire retreat stays slow to the final floor.
+  for (double extension : {0.15, 0.19}) {
     Harness harness({}, extension);
     auto output = harness.motion();
     CHECK(output.phase == Phase::SLOW_RETRACT);
@@ -418,6 +422,34 @@ void testShortStartingExtensionNeverExtendsOrOverRetracts() {
   }
 }
 
+void testConfiguredCruisePitchReplacesOnlyThePostClearanceTarget() {
+  auto config = fastFixtureConfig();
+  config.cruise_pitch_rad = 57.0 * kDeg;
+  Harness harness(config);
+  auto output = harness.motion();
+  CHECK(output.phase == Phase::SLOW_RETRACT);
+  CHECK(near(output.pitch_rad, harness.initial_pitch));
+  harness.input.extension_m = 0.500001;
+  harness.input.pitch_rad = 61.0 * kDeg;
+  output = harness.step();
+  CHECK(output.phase == Phase::SLOW_RETRACT);
+  CHECK(near(output.pitch_rad, harness.initial_pitch));
+  harness.input.extension_m = 0.50;
+  output = harness.step();
+  CHECK(output.phase == Phase::FAST_RETRACT);
+  CHECK(near(output.pitch_rad, config.cruise_pitch_rad));
+  CHECK(near(output.zipper_motor_velocity_rad_s, -config.fast_velocity_rad_s));
+  harness.input.pitch_rad = 58.0 * kDeg;
+  harness.input.dock_fresh = false;
+  output = harness.step();
+  CHECK(output.phase == Phase::DOCK_RECOVER);
+  checkHold(output, config.cruise_pitch_rad, harness.initial_yaw);
+  harness.input.dock_fresh = true;
+  output = harness.step(0.01, true);
+  CHECK(output.phase == Phase::FAST_RETRACT);
+  CHECK(near(output.pitch_rad, config.cruise_pitch_rad));
+}
+
 void testHeartbeatRecoveryAndRetryPreserveClearance() {
   Harness harness;
   harness.motion();
@@ -435,56 +467,56 @@ void testHeartbeatRecoveryAndRetryPreserveClearance() {
   output = harness.step(0.01, true);
   CHECK(output.phase == Phase::SLOW_RETRACT && output.dock_retry_attempt == 0);
   CHECK(near(output.pitch_rad, harness.initial_pitch));
-  harness.input.extension_m = 0.45;
+  harness.input.extension_m = 0.50;
   output = harness.step();
   CHECK(output.phase == Phase::FAST_RETRACT);
   harness.input.extension_m = 0.40;
   harness.input.dock_latch_open = false;
   output = harness.step();
   CHECK(output.phase == Phase::DOCK_RECOVER);
-  checkHold(output, 54.0 * kDeg, harness.initial_yaw);
+  checkHold(output, 60.0 * kDeg, harness.initial_yaw);
   output = harness.step(0.01, true);
   CHECK(output.phase == Phase::DOCK_DEACTIVATE && output.dock_retry_attempt == 1);
   CHECK(output.dock_command == DockCommand::IDLE);
-  checkHold(output, 54.0 * kDeg, harness.initial_yaw);
+  checkHold(output, 60.0 * kDeg, harness.initial_yaw);
   output = harness.cycleToMotion();
   CHECK(output.phase == Phase::FAST_RETRACT);
-  CHECK(near(output.pitch_rad, 54.0 * kDeg));
+  CHECK(near(output.pitch_rad, 60.0 * kDeg));
   CHECK(near(output.yaw_rad, harness.initial_yaw));
-  CHECK(near(output.zipper_motor_velocity_rad_s, -1.8));
+  CHECK(near(output.zipper_motor_velocity_rad_s, -2.0));
 }
 
-void testPitchLimitStopsRetractionAndDoesNotRecapturePitch() {
+void testPitchLimitStopsRetractionAndPreservesCruisePitch() {
   Harness harness;
   harness.motion();
-  harness.input.extension_m = 0.45;
+  harness.input.extension_m = 0.50;
   harness.input.pitch_rad = 64.0 * kDeg;
   auto output = harness.step();
   CHECK(output.phase == Phase::FAST_RETRACT);
-  // The correction target leaves enough margin to escape the motor deadband.
-  checkHold(output, 62.0 * kDeg, harness.initial_yaw);
+  // The fixed cruise target corrects below the ceiling before retracting again.
+  checkHold(output, 60.0 * kDeg, harness.initial_yaw);
   CHECK(output.dock_command == DockCommand::NONE);
 
   harness.input.pitch_rad = 62.5 * kDeg;
   output = harness.step();
   CHECK(output.phase == Phase::FAST_RETRACT);
   CHECK(output.actuation == Actuation::RETRACT_HOLD_PITCH);
-  CHECK(near(output.pitch_rad, 63.0 * kDeg));
-  CHECK(near(output.zipper_motor_velocity_rad_s, -1.8));
+  CHECK(near(output.pitch_rad, 60.0 * kDeg));
+  CHECK(near(output.zipper_motor_velocity_rad_s, -2.0));
   harness.input.pitch_rad = 64.0 * kDeg;
   harness.input.dock_fresh = false;
   output = harness.step();
   CHECK(output.phase == Phase::DOCK_RECOVER);
-  checkHold(output, 62.0 * kDeg, harness.initial_yaw);
+  checkHold(output, 60.0 * kDeg, harness.initial_yaw);
   harness.input.pitch_rad = 62.5 * kDeg;
   harness.input.dock_fresh = true;
   output = harness.step(0.01, true);
   CHECK(output.phase == Phase::FAST_RETRACT);
-  CHECK(near(output.pitch_rad, 63.0 * kDeg));
-  CHECK(near(output.zipper_motor_velocity_rad_s, -1.8));
+  CHECK(near(output.pitch_rad, 60.0 * kDeg));
+  CHECK(near(output.zipper_motor_velocity_rad_s, -2.0));
   harness.input.pitch_rad = 60.0 * kDeg;
   output = harness.step();
-  CHECK(near(output.pitch_rad, 63.0 * kDeg));
+  CHECK(near(output.pitch_rad, 60.0 * kDeg));
 
   // The guard stays active during the later 20-degree pitch adjustment.
   harness.input.extension_m = 0.30;
@@ -496,7 +528,7 @@ void testPitchLimitStopsRetractionAndDoesNotRecapturePitch() {
   output = harness.step();
   CHECK(output.phase == Phase::STOW_RETRACT);
   CHECK(near(output.pitch_rad, 20.0 * kDeg));
-  CHECK(near(output.zipper_motor_velocity_rad_s, -1.8));
+  CHECK(near(output.zipper_motor_velocity_rad_s, -2.0));
   harness.input.extension_m = 0.104;
   harness.input.pitch_rad = 64.0 * kDeg;
   output = harness.step();
@@ -535,10 +567,10 @@ void testPitchCeilingAlsoAppliesWhenFinalTargetIsAtLimit() {
   CHECK(near(output.zipper_motor_velocity_rad_s, 0.0));
 }
 
-void testRecoveryPreservesCapturedPitchAndStowProgress() {
+void testRecoveryPreservesCruisePitchAndStowProgress() {
   Harness harness;
   harness.motion();
-  harness.input.extension_m = 0.45;
+  harness.input.extension_m = 0.50;
   harness.input.pitch_rad = 61.0 * kDeg;
   CHECK(harness.step().phase == Phase::FAST_RETRACT);
   harness.input.extension_m = 0.40;
@@ -546,13 +578,13 @@ void testRecoveryPreservesCapturedPitchAndStowProgress() {
   harness.input.dock_fresh = false;
   auto output = harness.step();
   CHECK(output.phase == Phase::DOCK_RECOVER);
-  checkHold(output, 61.0 * kDeg, harness.initial_yaw);
+  checkHold(output, 60.0 * kDeg, harness.initial_yaw);
   harness.input.pitch_rad = 60.0 * kDeg;
   harness.input.dock_fresh = true;
   output = harness.step(0.01, true);
   CHECK(output.phase == Phase::FAST_RETRACT);
-  CHECK(near(output.pitch_rad, 61.0 * kDeg));
-  CHECK(near(output.zipper_motor_velocity_rad_s, -1.8));
+  CHECK(near(output.pitch_rad, 60.0 * kDeg));
+  CHECK(near(output.zipper_motor_velocity_rad_s, -2.0));
 
   harness.input.extension_m = 0.30;
   output = harness.step();
@@ -569,25 +601,25 @@ void testRecoveryPreservesCapturedPitchAndStowProgress() {
   CHECK(output.phase == Phase::STOW_RETRACT);
   CHECK(output.dock_retry_attempt == 1);
   CHECK(near(output.pitch_rad, 20.0 * kDeg));
-  CHECK(near(output.zipper_motor_velocity_rad_s, -1.8));
+  CHECK(near(output.zipper_motor_velocity_rad_s, -2.0));
 }
 
-void testClearanceCaptureAndPortLossInSameUpdate() {
+void testClearanceMilestoneAndPortLossInSameUpdate() {
   Harness harness({}, 0.65);
   harness.motion();
-  harness.input.extension_m = 0.49;
+  harness.input.extension_m = 0.55;
   harness.input.pitch_rad = 64.0 * kDeg;
   harness.input.dock_fresh = false;
   auto output = harness.step();
   CHECK(output.phase == Phase::DOCK_RECOVER);
-  checkHold(output, 62.0 * kDeg, harness.initial_yaw);
+  checkHold(output, 60.0 * kDeg, harness.initial_yaw);
   harness.input.pitch_rad = 61.0 * kDeg;
   harness.input.dock_fresh = true;
   output = harness.step(0.01, true);
   CHECK(output.phase == Phase::FAST_RETRACT);
-  // The captured angle from the clearance event survives the feedback pause.
-  CHECK(near(output.pitch_rad, 63.0 * kDeg));
-  CHECK(near(output.zipper_motor_velocity_rad_s, -1.8));
+  // Reaching clearance selects cruise pitch even when port feedback also drops.
+  CHECK(near(output.pitch_rad, 60.0 * kDeg));
+  CHECK(near(output.zipper_motor_velocity_rad_s, -2.0));
   CHECK(near(output.extension_m, 0.30));
 }
 
@@ -677,13 +709,13 @@ void testPreparationAndMissingFeedbackTimeouts() {
 }
 
 void testValidationAndNoApproachExtensionLimit() {
-  for (int invalid = 0; invalid < 14; ++invalid) {
+  for (int invalid = 0; invalid < 18; ++invalid) {
     Controller::Config config;
     if (invalid == 0) config.target_extension_m = -0.01;
     if (invalid == 1) config.target_pitch_rad = 90.0 * kDeg;
     if (invalid == 2) config.slow_clearance_m = std::numeric_limits<double>::quiet_NaN();
     if (invalid == 3) config.fast_velocity_rad_s = 2.1;
-    if (invalid == 4) config.slow_velocity_rad_s = 1.9;
+    if (invalid == 4) config.slow_velocity_rad_s = 2.1;
     if (invalid == 5) config.pitch_tolerance_rad = 0.0;
     if (invalid == 6) config.dock_prepare_timeout_sec = config.dock_activate_settle_sec;
     if (invalid == 7) config.dock_retry_attempts = -1;
@@ -697,7 +729,14 @@ void testValidationAndNoApproachExtensionLimit() {
     if (invalid == 13) {
       config.pitch_min_rad = 62.5 * kDeg;
       config.target_pitch_rad = 63.0 * kDeg;
+      config.cruise_pitch_rad = 63.0 * kDeg;
     }
+    if (invalid == 14) config.cruise_pitch_rad =
+        std::numeric_limits<double>::quiet_NaN();
+    if (invalid == 15) config.cruise_pitch_rad =
+        std::numeric_limits<double>::infinity();
+    if (invalid == 16) config.cruise_pitch_rad = config.pitch_min_rad - kDeg;
+    if (invalid == 17) config.cruise_pitch_rad = config.pitch_max_rad + kDeg;
     Controller controller(config);
     Controller::Input input;
     input.extension_m = 0.60;
@@ -738,11 +777,12 @@ int main() {
     testCommandOrderAndHeldButton();
     testMeasuredClearanceAndFinalPose();
     testShortStartingExtensionNeverExtendsOrOverRetracts();
+    testConfiguredCruisePitchReplacesOnlyThePostClearanceTarget();
     testHeartbeatRecoveryAndRetryPreserveClearance();
-    testPitchLimitStopsRetractionAndDoesNotRecapturePitch();
+    testPitchLimitStopsRetractionAndPreservesCruisePitch();
     testPitchCeilingAlsoAppliesWhenFinalTargetIsAtLimit();
-    testRecoveryPreservesCapturedPitchAndStowProgress();
-    testClearanceCaptureAndPortLossInSameUpdate();
+    testRecoveryPreservesCruisePitchAndStowProgress();
+    testClearanceMilestoneAndPortLossInSameUpdate();
     testMotionStopsForEachReadinessLoss();
     testBoundedCyclesAndReset();
     testPreparationAndMissingFeedbackTimeouts();

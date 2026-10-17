@@ -286,6 +286,7 @@ void Turret::UpdateCoordinatedTrajectory(double goal_extension,
 bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float max_zipper_velocity,
                                 bool hold_pitch, bool prioritize_pitch,
                                 double max_pitch_motor_velocity_rad_s) {
+  undocking_cable_controller_.reset();
   if (!pitch_motor_) {
     std::cerr << "ActuateTurretCable aborted: pitch motor unavailable" << std::endl;
     return false;
@@ -431,42 +432,38 @@ bool Turret::ActuateTurretCable(float goal_dist, float desired_pitch_rad, float 
   return true;
 }
 
+void Turret::ConfigureDockingPitchControl(
+    const turret_control::DockingPitchController::Config& config) {
+  // Construct first so an invalid update preserves the prior valid profile.
+  docking_pitch_controller_ = turret_control::DockingPitchController(config);
+}
+
 double Turret::ComputeDockingPitchMotorVelocity(
     double target_pitch_rad, double current_pitch_rad,
     double max_pitch_motor_velocity_rad_s) const {
-  constexpr double kPitchHoldDeadband = 0.008726646259971648;  // 0.5 deg
-  constexpr double kMinTrackingPitchVelocity = 0.20;  // Existing tracking correction, rad/s
   if (!std::isfinite(target_pitch_rad) || !std::isfinite(current_pitch_rad) ||
       !std::isfinite(max_pitch_motor_velocity_rad_s) ||
       max_pitch_motor_velocity_rad_s < 0.0 ||
+      max_pitch_motor_velocity_rad_s > max_omega_rad_ ||
       (max_pitch_motor_velocity_rad_s > 0.0 &&
-       max_pitch_motor_velocity_rad_s < kMinTrackingPitchVelocity)) {
+       max_pitch_motor_velocity_rad_s < 0.20)) {
     throw std::invalid_argument(
-        "Docking pitch requires finite angles and a motor velocity cap of 0 or at least 0.20 rad/s");
+        "Docking pitch requires finite angles and a motor velocity cap of 0 or from 0.20 to 2.0 rad/s");
   }
 
-  const double pitch_error = target_pitch_rad - current_pitch_rad;
-  if (std::fabs(pitch_error) <= kPitchHoldDeadband) {
-    return 0.0;
-  }
-  double pitch_motor_velocity = std::clamp(
-      pitch_kp_ * pitch_error, -max_omega_rad_, max_omega_rad_);
-  if (std::fabs(pitch_motor_velocity) < kMinTrackingPitchVelocity) {
-    pitch_motor_velocity = std::copysign(kMinTrackingPitchVelocity, pitch_error);
-  }
-  if (turret_limit_switch_.IsPressed() && pitch_motor_velocity < 0.0) {
-    return 0.0;
-  }
-  if (max_pitch_motor_velocity_rad_s > 0.0) {
-    pitch_motor_velocity = std::clamp(pitch_motor_velocity,
-                                      -max_pitch_motor_velocity_rad_s,
-                                      max_pitch_motor_velocity_rad_s);
-  }
-  return pitch_motor_velocity;
+  // Cap zero retains the existing API meaning: use the hardware velocity cap.
+  // The scheduled speed avoids the small proportional command keeping large
+  // autonomous corrections at the minimum movement velocity.
+  const double speed_cap = max_pitch_motor_velocity_rad_s > 0.0
+      ? max_pitch_motor_velocity_rad_s : max_omega_rad_;
+  return docking_pitch_controller_.computeVelocity(
+      target_pitch_rad - current_pitch_rad, speed_cap,
+      turret_limit_switch_.IsPressed());
 }
 
 void Turret::ActuateDockingPitch(double target_pitch_rad,
                                 double max_pitch_motor_velocity_rad_s) {
+  undocking_cable_controller_.reset();
   // A position target at the current extension does not guarantee an immediate stop.
   spiral_zipper_.Stop();
   if (!pitch_motor_) {
@@ -483,6 +480,7 @@ void Turret::ActuateDockingPitch(double target_pitch_rad,
 void Turret::ActuateDockingAdvance(double zipper_velocity_rad_s, double hold_pitch_rad,
                                   double max_pitch_motor_velocity_rad_s,
                                   double max_extension_m) {
+  undocking_cable_controller_.reset();
   if (!pitch_motor_) {
     throw std::runtime_error("ActuateDockingAdvance aborted: pitch motor unavailable");
   }
@@ -510,6 +508,7 @@ void Turret::ActuateDockingAdvance(double zipper_velocity_rad_s, double hold_pit
 
 void Turret::ActuateDockingInsertion(double zipper_motor_velocity_rad_s, double hold_pitch_rad,
                                     double max_pitch_motor_velocity_rad_s) {
+  undocking_cable_controller_.reset();
   if (!pitch_motor_) {
     throw std::runtime_error("ActuateDockingInsertion aborted: pitch motor unavailable");
   }
@@ -559,20 +558,34 @@ void Turret::ActuateUndockingRetraction(double zipper_motor_velocity_rad_s,
     pitch_motor_velocity = -0.20;
   }
 
+  const bool retracting = current_extension > minimum_extension_m &&
+      !spiral_zipper_.IsLimitSwitchPressed() && !pitch_above_limit;
+  double dc_dextension = 0.0;
+  double dc_dpitch = 0.0;
+  ComputeCableLengthJacobian(static_cast<float>(current_extension),
+      ToKinematicPitchAngle(current_pitch_angle), dc_dextension, dc_dpitch);
+  const double speed_cap = max_pitch_motor_velocity_rad_s > 0.0
+      ? max_pitch_motor_velocity_rad_s : max_omega_rad_;
+  const double now_sec = std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  pitch_motor_velocity = undocking_cable_controller_.computeVelocity(
+      now_sec, current_extension, dc_dextension, pitch_motor_radius_m_,
+      pitch_motor_velocity, speed_cap, retracting, turret_limit_switch_.IsPressed());
+
   // Retraction bypasses position trajectories and preserves the motor sign.
   ResetCoordinatedTrajectory(current_extension, current_pitch_angle);
-  if (current_extension <= minimum_extension_m || spiral_zipper_.IsLimitSwitchPressed() ||
-      pitch_above_limit) {
+  if (!retracting) {
     spiral_zipper_.Stop();
   } else {
     spiral_zipper_.SetMotorVelocity(std::clamp(zipper_motor_velocity_rad_s, -2.0, 0.0));
   }
-  // Joint feedback adjusts cable payout/takeup as the zipper retracts; it also
-  // maintains the requested pitch after the extension floor stops the zipper.
+  // Measured travel takes up cable even inside the pitch-error deadband. Joint
+  // feedback adds correction and still holds pitch when zipper travel stops.
   pitch_motor_->sendCommandMITMode(0.0, pitch_motor_velocity, 0.0, 1.8, 0.0);
 }
 
 bool Turret::ActuateFinalInsertionFreePitch(float goal_dist, float max_zipper_velocity) {
+  undocking_cable_controller_.reset();
   if (!pitch_motor_) {
     std::cerr << "ActuateFinalInsertionFreePitch aborted: pitch motor unavailable" << std::endl;
     return false;
@@ -632,6 +645,7 @@ bool Turret::ActuateFinalInsertionFreePitch(float goal_dist, float max_zipper_ve
 bool Turret::ActuateFixedVelocityPitchAndZipper(float goal_dist,
                                                 float max_zipper_velocity,
                                                 float pitch_motor_velocity_rad_s) {
+  undocking_cable_controller_.reset();
   if (!pitch_motor_) {
     std::cerr << "ActuateFixedVelocityPitchAndZipper aborted: pitch motor unavailable" << std::endl;
     return false;
@@ -687,18 +701,22 @@ bool Turret::ActuateFixedVelocityPitchAndZipper(float goal_dist,
 }
 
 void Turret::ZeroSpiralZipper() {
+  undocking_cable_controller_.reset();
   spiral_zipper_.Zero();
 }
 
 void Turret::ZeroSpiralZipper(double retract_velocity) {
+  undocking_cable_controller_.reset();
   spiral_zipper_.Zero(retract_velocity);
 }
 
 void Turret::ActuateSpiralZipperLength(float goal_dist) {
+  undocking_cable_controller_.reset();
   spiral_zipper_.ActuateLength(goal_dist);
 }
 
 void Turret::ActuateSpiralZipperLength(float goal_dist, double max_velocity) {
+  undocking_cable_controller_.reset();
   spiral_zipper_.ActuateLength(goal_dist, max_velocity);
 }
 
@@ -903,6 +921,7 @@ bool Turret::ZeroTurret(double retract_velocity, double pitch_velocity_ratio) {
 }
 
 void Turret::StopSpiralZipper() {
+  undocking_cable_controller_.reset();
   spiral_zipper_.Stop();
 }
 
@@ -966,15 +985,16 @@ void Turret::EnterTeleopMode() {
 }
 
 void Turret::EnableControlMotors() {
+  undocking_cable_controller_.reset();
   if (pitch_motor_) {
     pitch_motor_->enterMITMode();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    std::cout << "DEBUG: Pitch motor entered MIT control mode" << std::endl;
+    std::cout << "DEBUG: Pitch MIT mode command sent" << std::endl;
   }
   if (yaw_motor_) {
     yaw_motor_->enterMITMode();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    std::cout << "DEBUG: Yaw motor entered MIT control mode" << std::endl;
+    std::cout << "DEBUG: Yaw MIT mode command sent; encoder reply not yet confirmed" << std::endl;
   }
 }
 
@@ -989,10 +1009,12 @@ void Turret::ExitTeleopMode() {
 }
 
 void Turret::SetSpiralZipperVelocity(double velocity) {
+  undocking_cable_controller_.reset();
   spiral_zipper_.SetMotorVelocity(velocity);
 }
 
 void Turret::SetPitchVelocity(double velocity) {
+  undocking_cable_controller_.reset();
   pitch_motor_->sendCommandMITMode(0.0, velocity, 0.0, 0.3, 0.0);
 }
 
@@ -1015,7 +1037,120 @@ void Turret::HoldYawPosition(double desired_angle_rad, double kp, double kd) {
       0.0f);
 }
 
+Turret::DockingYawPulseResult Turret::ActuateDockingYawVelocity(
+    double signed_velocity_rad_s,
+    double fixed_target_rad,
+    double max_pulse_sec,
+    double hold_kp, double hold_kd,
+    double feedback_timeout_sec,
+    double target_tolerance_rad) {
+  try {
+    if (!yaw_motor_) {
+      throw std::runtime_error("Docking yaw burst aborted: yaw motor unavailable");
+    }
+    if (!std::isfinite(signed_velocity_rad_s) || signed_velocity_rad_s == 0.0 ||
+        std::abs(signed_velocity_rad_s) > 5.0 ||
+        !std::isfinite(fixed_target_rad) ||
+        !std::isfinite(max_pulse_sec) || max_pulse_sec <= 0.0 || max_pulse_sec > 0.05 ||
+        !std::isfinite(hold_kp) || hold_kp <= 0.0 || hold_kp > 500.0 ||
+        !std::isfinite(hold_kd) || hold_kd <= 0.0 || hold_kd > 5.0 ||
+        !std::isfinite(feedback_timeout_sec) || feedback_timeout_sec <= 0.0 ||
+        !std::isfinite(target_tolerance_rad) || target_tolerance_rad <= 0.0 ||
+        target_tolerance_rad > 1.0 * M_PI / 180.0) {
+      throw std::runtime_error("Docking yaw burst aborted: invalid velocity, pulse, target or feedback settings");
+    }
+    DockingYawPulseResult result;
+    const double pulse_feedback_age_sec = std::min(feedback_timeout_sec, 0.005);
+    const auto stop_and_observe = [&]() {
+      // A cached value from before stopping cannot authorize a position hold.
+      // Keep the original brake command and require its newly received reply.
+      for (int attempt = 0; attempt < 2 && !result.fresh_stopped_feedback; ++attempt) {
+        const auto sequence_before_stop = yaw_motor_->GetFeedbackSequence();
+        yaw_motor_->sendCommandMITMode(0.0f, 0.0f, 0.0f, 5.0f, 0.0f);
+        result.fresh_stopped_feedback =
+            yaw_motor_->GetFeedbackSequence() > sequence_before_stop &&
+            yaw_motor_->HasRecentFeedback(pulse_feedback_age_sec);
+      }
+      return result;
+    };
+    if (!yaw_motor_->HasRecentFeedback(feedback_timeout_sec)) {
+      result.feedback_interrupted = true;
+      return stop_and_observe();
+    }
+    const double initial_yaw_rad = yaw_motor_->getPosition();
+    const double remaining_rad = fixed_target_rad - initial_yaw_rad;
+    if (!std::isfinite(initial_yaw_rad) || !std::isfinite(yaw_motor_->getVelocity()) ||
+        yaw_motor_->getErrorFlag() != 0) {
+      throw std::runtime_error("Docking yaw burst aborted: invalid yaw motor feedback or drive error");
+    }
+    // The yaw controller bounds each target when it is created. Valid recoil
+    // can increase the remaining distance without moving that fixed target;
+    // keep its original deadline instead of failing or starting a new step.
+    if (std::abs(remaining_rad) <= target_tolerance_rad) {
+      return stop_and_observe();
+    }
+    if (remaining_rad * signed_velocity_rad_s <= 0.0) {
+      // Feedback can cross the target between the controller update and this
+      // call. Stop here; the next update completes the existing step normally.
+      return stop_and_observe();
+    }
+
+    // Keep the same MIT velocity command and damping as the proven teleop path.
+    // Each send polls CAN synchronously (normally a 1.2 ms cycle), so position
+    // crossing and feedback loss can brake without waiting for a ROS callback.
+    const double direction = signed_velocity_rad_s > 0.0 ? 1.0 : -1.0;
+    const auto pulse_started = std::chrono::steady_clock::now();
+    while (std::chrono::duration<double>(std::chrono::steady_clock::now() - pulse_started).count() <
+           max_pulse_sec) {
+      SetYawVelocity(signed_velocity_rad_s);
+      if (!yaw_motor_->HasRecentFeedback(pulse_feedback_age_sec)) {
+        result.feedback_interrupted = true;
+        break;
+      }
+      const double measured_yaw_rad = yaw_motor_->getPosition();
+      if (!std::isfinite(measured_yaw_rad) ||
+          !std::isfinite(yaw_motor_->getVelocity()) || yaw_motor_->getErrorFlag() != 0) {
+        throw std::runtime_error("Docking yaw burst aborted: invalid yaw motor feedback or drive error");
+      }
+      const double pulse_motion_rad = measured_yaw_rad - initial_yaw_rad;
+      result.reverse_motion_rad = std::max(result.reverse_motion_rad,
+                                          -pulse_motion_rad * direction);
+      if (std::abs(pulse_motion_rad) > 5.0 * M_PI / 180.0) {
+        result.position_discontinuity = true;
+        break;
+      }
+      // Small valid recoil/backlash is ordinary position error. Preserve this
+      // fixed target and keep driving within the existing short pulse deadline.
+      if ((fixed_target_rad - measured_yaw_rad) * direction <= target_tolerance_rad) {
+        break;
+      }
+    }
+
+    // Brake without commanding an unconfirmed position. The caller validates
+    // this braking reply before selecting a strong position hold target.
+    return stop_and_observe();
+  } catch (...) {
+    // Brake yaw first: StopAllMotors stops the zipper and pitch before yaw, so a
+    // failure in either of those paths must not prevent this velocity from being
+    // cancelled. Then attempt the regular stop for every motor.
+    if (yaw_motor_) {
+      try {
+        yaw_motor_->sendCommandMITMode(0.0f, 0.0f, 0.0f, 5.0f, 0.0f);
+      } catch (...) {
+        // Still attempt the all-motor stop below.
+      }
+    }
+    try {
+      StopAllMotors();
+    } catch (...) {
+      // Preserve the original burst error for the ROS controller to report.
+    }
+    throw;
+  }
+}
+
 void Turret::StopAllMotors() {
+  undocking_cable_controller_.reset();
   spiral_zipper_.Stop();
   ResetCoordinatedTrajectory(spiral_zipper_.GetExtension(), GetPitchAngle());
   if (pitch_motor_) {
@@ -1089,6 +1224,14 @@ int Turret::GetYawMotorErrorFlag() const {
 
 bool Turret::HasFreshYawFeedback(double max_age_sec) const {
   return yaw_motor_ && yaw_motor_->HasRecentFeedback(max_age_sec);
+}
+
+std::uint64_t Turret::GetYawFeedbackSequence() const {
+  return yaw_motor_ ? yaw_motor_->GetFeedbackSequence() : 0;
+}
+
+std::string Turret::GetYawFeedbackDiagnostics() const {
+  return yaw_motor_ ? yaw_motor_->GetFeedbackDiagnostics() : "yaw motor unavailable";
 }
 
 double Turret::GetPitchMotorVelocity() const {

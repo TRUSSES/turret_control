@@ -266,14 +266,42 @@ struct YawHarness {
     input.requested_yaw_rad = initial_yaw + 2.0 * kDeg;
     input.camera_x_error_m = 0.05;
     input.allow_alignment = true;
-    controller.start(0.0, initial_yaw);
+    input.feedback_sequence = 1;
+    input.require_recovery_capture = true;
+    controller.start(0.0, initial_yaw, input.feedback_sequence);
   }
 
-  YawController::Output step(double dt = 0.01, bool new_capture = true) {
+  void advance(double dt, bool new_capture, bool new_feedback) {
     input.now_sec += dt;
     input.camera_now_ns += static_cast<std::int64_t>(dt * 1e9);
     if (new_capture) input.pose_stamp_ns = input.camera_now_ns;
-    return controller.update(input);
+    if (new_feedback) ++input.feedback_sequence;
+  }
+
+  YawController::Output observe(double dt = 0.01, bool new_capture = true,
+                                bool new_feedback = true) {
+    advance(dt, new_capture, new_feedback);
+    const auto output = controller.observeFeedback(input);
+    if (output.feedback_recovery_required || output.failed) {
+      CHECK(near(output.motor_velocity_rad_s, 0.0));
+      CHECK(!output.adjusting);
+    }
+    return output;
+  }
+
+  YawController::Output step(double dt = 0.01, bool new_capture = true,
+                            bool new_feedback = true) {
+    advance(dt, new_capture, new_feedback);
+    const auto output = controller.update(input);
+    // Only an unfinished correction authorizes a motor velocity pulse. Every
+    // stopped, canceled, observed, completed, or failed result must remove it.
+    if (output.adjusting && !output.failed && !output.feedback_recovery_required) {
+      const double sign = output.yaw_rad > input.yaw_rad ? 1.0 : -1.0;
+      CHECK(near(output.motor_velocity_rad_s, sign * config.motor_velocity_rad_s));
+    } else {
+      CHECK(near(output.motor_velocity_rad_s, 0.0));
+    }
+    return output;
   }
 };
 
@@ -341,7 +369,7 @@ void testPitchCenteringAndHolding() {
   CHECK(output.actuation == Actuation::EXTEND_HOLD_PITCH);
   CHECK(near(output.pitch_rad, centeredPitch));
   CHECK(near(output.extension_m, harness.input.extension_m));
-  CHECK(near(output.zipper_motor_velocity_rad_s, 1.2));
+  CHECK(near(output.zipper_motor_velocity_rad_s, 1.5));
 
   // Camera motion inside the outer window does not change the held pitch.
   harness.input.camera_y_m = harness.config.goal_camera_y_m +
@@ -365,7 +393,7 @@ void testPitchCenteringAndHolding() {
   CHECK(near(output.zipper_motor_velocity_rad_s, 0.0));
   CHECK(output.pitch_rad < harness.input.pitch_rad);
 
-  // Hysteresis requires a return inside 1 degree, not merely below 4.
+  // Hysteresis requires a return inside 2 degrees, not merely below 4.
   harness.input.camera_y_m = harness.config.goal_camera_y_m +
       harness.input.camera_z_m * std::tan(3.0 * kDeg);
   CHECK(harness.step().phase == Phase::PITCH_CENTER);
@@ -406,25 +434,181 @@ void testPitchCenteringAndHolding() {
     CHECK(output.phase == Phase::PITCH_CENTER);
     CHECK(near(output.extension_m, clamped.input.extension_m));
     CHECK(output.pitch_rad <= clamped.config.pitch_max_rad + 1e-9);
-    CHECK(output.yaw_rad <= startingYaw + clamped.config.yaw_limit_from_start_rad + 1e-9);
     CHECK(std::fabs(output.yaw_rad - clamped.input.yaw_rad) <=
           clamped.config.max_yaw_rate_rad_s * 0.1 + 1e-9);
     clamped.follow(output);
   }
   CHECK(near(output.pitch_rad, clamped.config.pitch_max_rad));
-  CHECK(near(output.yaw_rad, startingYaw + clamped.config.yaw_limit_from_start_rad));
+  // Pitch remains mechanically bounded while valid visual yaw corrections
+  // continue beyond the former 30-degree displacement from docking start.
+  CHECK(output.yaw_rad > startingYaw + 30.0 * kDeg);
 
-  // Just outside the handoff, 4 mm exceeds the 1 degree window but is less than
-  // the old metric pitch deadband. Center pitch with the zipper stopped.
+  // Just outside the handoff, 8 mm exceeds the 2 degree window.
+  // Center pitch with the zipper stopped.
   Harness closeCenter;
   closeCenter.input.pose_fresh = true;
   closeCenter.input.camera_z_m = closeCenter.config.insertion_distance_m + 0.01;
-  closeCenter.input.camera_y_m = closeCenter.config.goal_camera_y_m + 0.004;
+  closeCenter.input.camera_y_m = closeCenter.config.goal_camera_y_m + 0.008;
   output = closeCenter.step();
   CHECK(output.phase == Phase::PITCH_CENTER);
   CHECK(output.actuation == Actuation::CENTER_PITCH);
   CHECK(output.pitch_rad < closeCenter.input.pitch_rad);
   CHECK(near(output.extension_m, closeCenter.input.extension_m));
+}
+
+void setCameraPitchError(Harness& harness, double error_rad) {
+  harness.input.pose_fresh = true;
+  harness.input.camera_y_m = harness.config.goal_camera_y_m -
+      harness.input.camera_z_m * std::tan(error_rad);
+}
+
+void testAdaptivePitchCoarseFineAndDirections() {
+  // A large image error advances the pitch target three times faster than a
+  // small error; both directions stop the zipper until the tag is centered.
+  for (double direction : {-1.0, 1.0}) {
+    Harness coarse;
+    setCameraPitchError(coarse, direction * 10.0 * kDeg);
+    auto output = coarse.step();
+    CHECK(output.phase == Phase::PITCH_CENTER);
+    CHECK(output.actuation == Actuation::CENTER_PITCH);
+    CHECK(near(output.pitch_rad - coarse.input.pitch_rad, direction * 1.5 * kDeg));
+    CHECK(near(output.zipper_motor_velocity_rad_s, 0.0));
+
+    Harness fine;
+    setCameraPitchError(fine, direction * 2.5 * kDeg);
+    output = fine.step();
+    CHECK(output.phase == Phase::PITCH_CENTER);
+    CHECK(near(output.pitch_rad - fine.input.pitch_rad, direction * 0.5 * kDeg));
+    for (int tick = 0; tick < 40; ++tick) output = fine.step();
+    CHECK(near(output.pitch_rad - fine.input.pitch_rad, direction * 2.0 * kDeg));
+
+    // A blocked motor cannot accumulate a large latent correction. Search
+    // and coarse camera correction allow six degrees, fine correction two.
+    for (int tick = 0; tick < 40; ++tick) output = coarse.step();
+    CHECK(near(output.pitch_rad - coarse.input.pitch_rad, direction * 6.0 * kDeg));
+    CHECK(near(output.extension_m, coarse.input.extension_m));
+  }
+
+  Harness search;
+  auto output = search.step();
+  CHECK(near(output.pitch_rad - search.input.pitch_rad, 1.5 * kDeg));
+  for (int tick = 0; tick < 40; ++tick) output = search.step();
+  CHECK(near(output.pitch_rad - search.input.pitch_rad, 6.0 * kDeg));
+
+  Harness approach;
+  CHECK(near(approach.approach().zipper_motor_velocity_rad_s, 1.5));
+  CHECK(near(approach.insert().zipper_motor_velocity_rad_s, 1.4));
+}
+
+double firstPitchAdvance(double camera_error_rad) {
+  Harness harness;
+  setCameraPitchError(harness, camera_error_rad);
+  return harness.step().pitch_rad - harness.input.pitch_rad;
+}
+
+void testAdaptivePitchSmoothTransition() {
+  // The transition is continuous at both ends, and its midpoint is faster
+  // than fine correction while remaining slower than coarse correction.
+  const double fine = firstPitchAdvance(3.0 * kDeg);
+  const double coarse = firstPitchAdvance(8.0 * kDeg);
+  const double middle = firstPitchAdvance(5.5 * kDeg);
+  CHECK(near(fine, 0.5 * kDeg));
+  CHECK(near(coarse, 1.5 * kDeg));
+  CHECK(middle > fine && middle < coarse);
+  CHECK(near(firstPitchAdvance(-5.5 * kDeg), -middle));
+  for (double threshold : {3.0 * kDeg, 8.0 * kDeg}) {
+    const double below = firstPitchAdvance(threshold - 0.01 * kDeg);
+    const double above = firstPitchAdvance(threshold + 0.01 * kDeg);
+    CHECK(std::fabs(above - below) < 0.002 * kDeg);
+    CHECK(above >= below);
+  }
+
+  Harness delayed;
+  setCameraPitchError(delayed, 10.0 * kDeg);
+  const auto output = delayed.step(10.0);
+  CHECK(near(output.pitch_rad - delayed.input.pitch_rad, 1.5 * kDeg));
+}
+
+void testAdaptivePitchRemainingErrorAndReversal() {
+  // Use a deliberately tighter local acceptance window to exercise the
+  // remaining-error clamp below the production 2 degree centering tolerance.
+  Controller::Config precise;
+  precise.centering_start_tolerance_rad = 1.0 * kDeg;
+  for (double direction : {-1.0, 1.0}) {
+    Harness close(precise);
+    setCameraPitchError(close, direction * 1.1 * kDeg);
+    Controller::Output output;
+    for (int tick = 0; tick < 20; ++tick) {
+      output = close.step();
+      CHECK(direction * (output.pitch_rad - close.input.pitch_rad) > 0.0);
+      CHECK(direction * (output.pitch_rad - close.input.pitch_rad) <= 1.1 * kDeg + 1e-9);
+    }
+    CHECK(near(output.pitch_rad - close.input.pitch_rad, direction * 1.1 * kDeg));
+
+    Harness changing(precise);
+    setCameraPitchError(changing, direction * 10.0 * kDeg);
+    for (int tick = 0; tick < 20; ++tick) output = changing.step();
+    CHECK(near(output.pitch_rad - changing.input.pitch_rad, direction * 6.0 * kDeg));
+    // A newer image reduces the remaining correction below the accumulated
+    // coarse lead. The target must stay within what this image still needs.
+    setCameraPitchError(changing, direction * 1.2 * kDeg);
+    output = changing.step();
+    CHECK(near(output.pitch_rad - changing.input.pitch_rad, direction * 1.2 * kDeg));
+    // Reversing the camera error must discard the old direction immediately.
+    setCameraPitchError(changing, -direction * 2.0 * kDeg);
+    output = changing.step();
+    CHECK(near(output.pitch_rad - changing.input.pitch_rad, -direction * 0.5 * kDeg));
+    CHECK(near(output.zipper_motor_velocity_rad_s, 0.0));
+  }
+
+  for (double direction : {-1.0, 1.0}) {
+    Harness bound;
+    bound.input.pitch_rad = direction > 0.0
+        ? bound.config.pitch_max_rad - 0.25 * kDeg
+        : bound.config.pitch_min_rad + 0.25 * kDeg;
+    bound.controller.start(bound.input);
+    setCameraPitchError(bound, direction * 10.0 * kDeg);
+    for (int tick = 0; tick < 20; ++tick) {
+      const auto output = bound.step();
+      CHECK(output.pitch_rad >= bound.config.pitch_min_rad);
+      CHECK(output.pitch_rad <= bound.config.pitch_max_rad);
+      CHECK(near(output.pitch_rad, direction > 0.0
+          ? bound.config.pitch_max_rad : bound.config.pitch_min_rad));
+    }
+  }
+}
+
+void testAdaptivePitchConfiguration() {
+  using Field = double Controller::Config::*;
+  const Field positive_fields[] = {
+    &Controller::Config::fine_pitch_rate_rad_s,
+    &Controller::Config::fine_pitch_step_rad,
+    &Controller::Config::pitch_fine_error_rad,
+    &Controller::Config::pitch_coarse_error_rad
+  };
+  for (Field field : positive_fields) {
+    for (double value : {0.0, -1.0, std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN()}) {
+      Controller::Config config;
+      config.*field = value;
+      Harness invalid(config);
+      CHECK(invalid.step().phase == Phase::FAILED);
+    }
+  }
+  for (int invalid_setting = 0; invalid_setting < 4; ++invalid_setting) {
+    Controller::Config config;
+    if (invalid_setting == 0) config.fine_pitch_rate_rad_s = config.max_pitch_rate_rad_s + kDeg;
+    if (invalid_setting == 1) config.fine_pitch_step_rad = config.max_pitch_step_rad + kDeg;
+    if (invalid_setting == 2) config.pitch_fine_error_rad = config.centering_start_tolerance_rad;
+    if (invalid_setting == 3) config.pitch_coarse_error_rad = config.pitch_fine_error_rad;
+    Harness invalid(config);
+    CHECK(invalid.step().phase == Phase::FAILED);
+  }
+  Controller::Config constant;
+  constant.fine_pitch_rate_rad_s = constant.max_pitch_rate_rad_s;
+  constant.fine_pitch_step_rad = constant.max_pitch_step_rad;
+  Harness valid(constant);
+  CHECK(valid.step().phase == Phase::SEARCH);
 }
 
 void testInsertionHandoff() {
@@ -467,7 +651,7 @@ void testInsertionHandoff() {
   CHECK(near(output.yaw_rad, harness.input.yaw_rad));
   output = harness.finishPreparation();
   CHECK(output.actuation == Actuation::INSERT_HOLD_PITCH);
-  CHECK(near(output.zipper_motor_velocity_rad_s, 1.2));
+  CHECK(near(output.zipper_motor_velocity_rad_s, 1.4));
 
   Harness missingDock;
   missingDock.approach();
@@ -1609,7 +1793,7 @@ void testApproachBurstAndNewCapture() {
   Harness harness;
   auto output = harness.approach();
   CHECK(output.actuation == Actuation::EXTEND_HOLD_PITCH);
-  CHECK(near(output.zipper_motor_velocity_rad_s, 1.2));
+  CHECK(near(output.zipper_motor_velocity_rad_s, 1.5));
   CHECK(near(output.extension_m, harness.input.extension_m));
   CHECK(!harness.controller.needsApproachUpdate(harness.input));
   CHECK(harness.controller.allowsYawAlignment(harness.input));
@@ -1657,11 +1841,11 @@ void testApproachBurstAndNewCapture() {
   CHECK(near(output.zipper_motor_velocity_rad_s, 0.0));
   CHECK(!harness.controller.allowsYawAlignment(harness.input));
 
-  // A post-stop capture permits a pitch check; a 2 degree error still needs
-  // correction before another burst because the centering target is 1 degree.
+  // A post-stop capture permits a pitch check; a 2.5 degree error still needs
+  // correction before another burst because the centering target is 2 degrees.
   harness.input.pose_stamp_ns = stopStamp + 1;
   harness.input.camera_y_m = harness.config.goal_camera_y_m +
-      harness.input.camera_z_m * std::tan(2.0 * kDeg);
+      harness.input.camera_z_m * std::tan(2.5 * kDeg);
   CHECK(harness.controller.allowsYawAlignment(harness.input));
   output = harness.step(0.1, false);
   CHECK(output.phase == Phase::PITCH_CENTER);
@@ -1674,7 +1858,7 @@ void testApproachBurstAndNewCapture() {
   CHECK(output.phase == Phase::APPROACH);
   CHECK(output.actuation == Actuation::EXTEND_HOLD_PITCH);
   CHECK(near(output.pitch_rad, harness.input.pitch_rad));
-  CHECK(near(output.zipper_motor_velocity_rad_s, 1.2));
+  CHECK(near(output.zipper_motor_velocity_rad_s, 1.5));
   CHECK(harness.controller.allowsYawAlignment(harness.input));
 
   // A valid final handoff and fresh physical contact both outrank the deadline.
@@ -1876,7 +2060,7 @@ void testValidationResetAndBurstWait() {
   CHECK(rejected.phase == Phase::FAILED);
   CHECK(rejected.actuation == Actuation::STOP);
   CHECK(rejected.status.find("pitch=370.898") != std::string::npos);
-  CHECK(rejected.status.find("63.000000") != std::string::npos);
+  CHECK(rejected.status.find("70.000000") != std::string::npos);
   CHECK(rejected.status.find("extension=0.015443") != std::string::npos);
   badHome.input.pitch_rad = 12.3047 * kDeg;
   badHome.controller.start(badHome.input);
@@ -1967,9 +2151,105 @@ void testYawAlignmentPhaseGuard() {
   CHECK(!insertion.controller.allowsYawAlignment(insertion.input));
 }
 
+void testYawThreeCentimeterLateralDeadband() {
+  CHECK(near(Controller::Config{}.lateral_deadband_m, 0.03));
+  CHECK(near(YawController::Config{}.camera_lateral_deadband_m, 0.03));
+  CHECK(near(YawController::Config{}.camera_lateral_resume_m, 0.05));
+
+  // Both yaw layers accept the boundary, including errors that used to
+  // provoke fine corrections. The deadband is relative to the camera goal.
+  for (double error : {-0.03, -0.025, 0.0, 0.025, 0.03}) {
+    Controller::Config settings;
+    settings.goal_camera_x_m = 0.1;
+    Harness core(settings);
+    core.input.pose_fresh = true;
+    core.input.camera_x_m = settings.goal_camera_x_m + error;
+    core.input.camera_y_m = 0.08;
+    const auto coreOutput = core.step();
+    CHECK(coreOutput.phase == Phase::PITCH_CENTER);
+    CHECK(near(coreOutput.yaw_rad, core.input.yaw_rad));
+
+    YawHarness hold(YawController::Config{}, 0.4);
+    hold.input.camera_x_error_m = error;
+    const auto output = hold.step();
+    CHECK(!output.adjusting && !output.waiting_for_capture && !output.failed);
+    CHECK(near(output.motor_velocity_rad_s, 0.0));
+    CHECK(near(output.yaw_rad, 0.4));
+  }
+
+  for (double sign : {-1.0, 1.0}) {
+    YawHarness harness(YawController::Config{}, 0.4);
+    harness.input.camera_x_error_m = sign * 0.04;
+    auto output = harness.step();
+    CHECK(output.adjusting && !output.failed);
+    CHECK(near(output.step_rad, sign * 3.0 * kDeg));
+    CHECK(near(output.motor_velocity_rad_s, sign * 3.5));
+
+    // Entering the accepted window cancels an in-flight coarse step even
+    // when the pitch controller is waiting for its next camera capture.
+    harness.input.yaw_rad += sign * 0.2 * kDeg;
+    harness.input.camera_x_error_m = sign * 0.025;
+    harness.input.allow_new_target = false;
+    output = harness.step();
+    CHECK(!output.adjusting && output.waiting_for_capture && !output.failed);
+    CHECK(near(output.motor_velocity_rad_s, 0.0));
+    const double heldYaw = output.yaw_rad;
+
+    // A settled angle remains fixed across new poses and encoder noise;
+    // the old queued request must not create another motor pulse.
+    harness.input.allow_new_target = true;
+    for (double error : {sign * 0.029, -sign * 0.025, sign * 0.03,
+                         sign * 0.032, -sign * 0.049, sign * 0.05}) {
+      harness.input.camera_x_error_m = error;
+      harness.input.yaw_rad = heldYaw + sign * 0.167 * kDeg;
+      output = harness.step(0.25);
+      CHECK(!output.adjusting && !output.waiting_for_capture && !output.failed);
+      CHECK(near(output.motor_velocity_rad_s, 0.0));
+      CHECK(near(output.yaw_rad, heldYaw));
+    }
+
+    // After alignment, noise above 3 cm does not restart fine corrections.
+    // Only drift beyond the 5 cm outer window resumes a full-speed step.
+    harness.input.camera_x_error_m = sign * 0.06;
+    output = harness.step();
+    CHECK(output.adjusting && !output.failed);
+    CHECK(near(output.step_rad, sign * 3.0 * kDeg));
+    CHECK(near(output.motor_velocity_rad_s, sign * 3.5));
+
+    harness.input.camera_x_error_m = sign * 0.025;
+    CHECK(!harness.step().adjusting);
+    harness.input.camera_x_error_m = sign * 0.06;
+    CHECK(harness.step(0.1, false).waiting_for_capture);
+    CHECK(harness.step(0.11, false).waiting_for_capture);
+    output = harness.step();
+    CHECK(output.adjusting && !output.failed);
+    CHECK(near(output.motor_velocity_rad_s, sign * 3.5));
+
+    // A new run starts coarse alignment afresh, including an initial error
+    // between the stop and resume thresholds.
+    harness.input.camera_x_error_m = sign * 0.025;
+    CHECK(!harness.step().adjusting);
+    harness.controller.start(harness.input.now_sec, harness.input.yaw_rad,
+                             harness.input.feedback_sequence);
+    harness.input.camera_x_error_m = sign * 0.04;
+    output = harness.step();
+    CHECK(output.adjusting && !output.failed);
+    CHECK(near(output.motor_velocity_rad_s, sign * 3.5));
+  }
+
+  for (double resume : {0.029, -0.01,
+                         std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN()}) {
+    YawController::Config invalid;
+    invalid.camera_lateral_resume_m = resume;
+    YawHarness harness(invalid);
+    CHECK(harness.step().failed);
+  }
+}
+
 void testYawSmallRequestsFullStep() {
   // The core can request less than the motor completion deadband. That still
-  // authorizes one full bounded step, with its direction set by this capture.
+  // allows one full small step, with its direction set by this capture.
   const double initialYaw = 0.4;
   for (double requestDegrees : {0.01, 0.05}) {
     for (double sign : {-1.0, 1.0}) {
@@ -1999,23 +2279,62 @@ void testYawSmallRequestsFullStep() {
   YawHarness zero;
   zero.input.requested_yaw_rad = zero.input.yaw_rad;
   auto output = zero.step();
-  CHECK(!output.adjusting && !output.waiting_for_capture);
-  CHECK(near(output.yaw_rad, zero.input.yaw_rad));
-  CHECK(near(output.step_rad, 0.0));
+  CHECK(output.adjusting && !output.waiting_for_capture);
+  CHECK(near(output.yaw_rad, zero.input.yaw_rad + zero.config.step_rad));
+  CHECK(near(output.step_rad, zero.config.step_rad));
 
-  YawHarness mismatched;
-  mismatched.input.requested_yaw_rad = -0.01 * kDeg;
-  output = mismatched.step();
-  CHECK(!output.adjusting && !output.waiting_for_capture);
-  CHECK(near(output.yaw_rad, mismatched.input.yaw_rad));
-  mismatched.input.camera_x_error_m = -0.05;
-  mismatched.input.requested_yaw_rad = 0.05 * kDeg;
-  output = mismatched.step();
-  CHECK(!output.adjusting && !output.waiting_for_capture);
-  CHECK(near(output.yaw_rad, mismatched.input.yaw_rad));
-  mismatched.input.requested_yaw_rad = -0.01 * kDeg;
-  output = mismatched.step();
-  CHECK(output.adjusting && near(output.step_rad, -mismatched.config.step_rad));
+  // An independently ramped core request must not veto the camera direction.
+  for (double sign : {-1.0, 1.0}) {
+    YawHarness mismatched;
+    mismatched.input.requested_yaw_rad = -sign * 0.01 * kDeg;
+    mismatched.input.camera_x_error_m = sign * 0.05;
+    output = mismatched.step();
+    CHECK(output.adjusting && !output.failed);
+    CHECK(near(output.step_rad, sign * mismatched.config.step_rad));
+  }
+}
+
+void testYawCameraDirectionSurvivesLaggingCoreTarget() {
+  const double initialYaw = 98.27 * kDeg;
+  YawHarness harness(YawController::Config{}, initialYaw);
+  harness.input.camera_x_error_m = -0.121;
+  harness.input.requested_yaw_rad = initialYaw - 0.02 * kDeg;
+  auto output = harness.step();
+  CHECK(output.adjusting && near(output.yaw_rad, initialYaw - harness.config.step_rad));
+
+  // Complete the fixed target. The old core setpoint is now on the positive
+  // side of measured yaw, while the camera still requests a negative nudge.
+  harness.input.yaw_rad = output.yaw_rad;
+  output = harness.step();
+  CHECK(!output.adjusting && output.waiting_for_capture);
+  CHECK(harness.input.requested_yaw_rad > harness.input.yaw_rad);
+  output = harness.step(harness.config.observation_pause_sec + 0.01);
+  CHECK(output.adjusting && !output.failed);
+  CHECK(near(output.yaw_rad, harness.input.yaw_rad - harness.config.step_rad));
+  CHECK(near(output.motor_velocity_rad_s, -3.5));
+}
+
+void testYawCumulativeSmallStepsContinueBeyondThirtyDegrees() {
+  for (double sign : {-1.0, 1.0}) {
+    const double initialYaw = 510.4 * kDeg;
+    YawHarness harness(YawController::Config{}, initialYaw);
+    harness.input.camera_x_error_m = sign * 0.1;
+    // Deliberately keep the core request fixed as encoder feedback progresses.
+    harness.input.requested_yaw_rad = initialYaw + sign * 0.01 * kDeg;
+    auto output = harness.step();
+    for (int index = 0; index < 12; ++index) {
+      CHECK(output.adjusting && !output.failed && !output.feedback_recovery_required);
+      CHECK(near(output.yaw_rad, harness.input.yaw_rad + sign * harness.config.step_rad));
+      harness.input.yaw_rad = output.yaw_rad;
+      output = harness.step(0.02);
+      CHECK(!output.adjusting && output.waiting_for_capture && !output.failed);
+      CHECK(near(output.yaw_rad, harness.input.yaw_rad));
+      output = harness.step(harness.config.observation_pause_sec + 0.01);
+    }
+    CHECK(sign * (harness.input.yaw_rad - initialYaw) > 30.0 * kDeg);
+    CHECK(output.adjusting && !output.failed && !output.feedback_recovery_required);
+    CHECK(near(output.step_rad, sign * harness.config.step_rad));
+  }
 }
 
 void testYawTimeoutMotionReporting() {
@@ -2067,9 +2386,7 @@ void testYawStepsObservationAndDirection() {
   CHECK(!output.step_timed_out);
   CHECK(near(output.yaw_rad, harness.input.yaw_rad));
   output = harness.step(0.25);
-  CHECK(!output.adjusting);  // Old positive core target contradicts this capture.
-  harness.input.requested_yaw_rad = -3.0 * kDeg;
-  output = harness.step();
+  // The fresh negative camera direction overrides the old positive core target.
   CHECK(output.adjusting && near(output.yaw_rad, -harness.config.step_rad));
 
   // Repeated larger requests do not restart the two-second step deadline.
@@ -2098,6 +2415,7 @@ void testYawStepsObservationAndDirection() {
   YawHarness reached;
   output = reached.step();
   reached.input.yaw_rad = output.yaw_rad - 0.1 * kDeg;
+  reached.input.requested_yaw_rad = reached.input.yaw_rad + 2.0 * kDeg;
   output = reached.step();
   CHECK(!output.adjusting && output.waiting_for_capture);
   CHECK(!output.step_timed_out);
@@ -2107,12 +2425,13 @@ void testYawStepsObservationAndDirection() {
 
   // Crossing the target freezes actual yaw rather than pulling backward.
   YawHarness overshoot;
-  overshoot.step();
-  overshoot.input.yaw_rad = 1.167 * kDeg;
+  output = overshoot.step();
+  const double crossedTarget = output.yaw_rad + 0.167 * kDeg;
+  overshoot.input.yaw_rad = crossedTarget;
   output = overshoot.step();
   CHECK(!output.adjusting && output.waiting_for_capture);
   CHECK(!output.step_timed_out);
-  CHECK(near(output.yaw_rad, 1.167 * kDeg));
+  CHECK(near(output.yaw_rad, crossedTarget));
 
   // Centered camera error cancels motion and discards queued core corrections.
   YawHarness centered;
@@ -2126,9 +2445,17 @@ void testYawStepsObservationAndDirection() {
   output = centered.step(0.25);
   CHECK(!output.adjusting && !output.waiting_for_capture);
   CHECK(near(output.yaw_rad, centered.input.yaw_rad));
+  const double centeredHold = output.yaw_rad;
+  centered.input.yaw_rad += 0.167 * kDeg;
+  for (int tick = 0; tick < 10; ++tick) {
+    output = centered.step();
+    CHECK(!output.adjusting && !output.waiting_for_capture && !output.failed);
+    CHECK(near(output.yaw_rad, centeredHold));
+    CHECK(near(output.motor_velocity_rad_s, 0.0));
+  }
 }
 
-void testYawCancellationBoundsAndValidation() {
+void testYawCancellationSettledHoldAndValidation() {
   YawHarness canceled;
   canceled.step();
   canceled.input.yaw_rad = 0.2 * kDeg;
@@ -2137,30 +2464,15 @@ void testYawCancellationBoundsAndValidation() {
   auto output = canceled.step();
   CHECK(!output.adjusting && output.waiting_for_capture);
   CHECK(!output.step_timed_out);
+  const double canceledHold = output.yaw_rad;
   canceled.input.yaw_rad = 0.4 * kDeg;
   output = canceled.step(1.0);
-  CHECK(output.waiting_for_capture && near(output.yaw_rad, canceled.input.yaw_rad));
+  CHECK(output.waiting_for_capture && near(output.yaw_rad, canceledHold));
   canceled.input.allow_alignment = true;
   canceled.input.allow_new_target = true;
   output = canceled.step();
   CHECK(output.adjusting);  // Disabled ticks did not restart the pause.
   CHECK(near(output.yaw_rad, canceled.input.yaw_rad + canceled.config.step_rad));
-
-  YawController::Config boundedConfig;
-  boundedConfig.yaw_limit_from_start_rad = 1.0 * kDeg;
-  const double initialYaw = 0.4;
-  YawHarness bounded(boundedConfig, initialYaw);
-  bounded.input.yaw_rad = initialYaw + 0.7 * kDeg;
-  bounded.input.allow_alignment = false;
-  bounded.step();  // Refresh a released hold without changing its original bounds.
-  bounded.input.allow_alignment = true;
-  bounded.input.requested_yaw_rad = initialYaw + 10.0 * kDeg;
-  output = bounded.step();
-  CHECK(output.adjusting && near(output.yaw_rad, initialYaw + 1.0 * kDeg));
-  CHECK(output.yaw_rad - bounded.input.yaw_rad <= bounded.config.step_rad + 1e-9);
-  CHECK(near(output.step_rad, 0.3 * kDeg));
-  bounded.input.yaw_rad = initialYaw + 1.1 * kDeg;
-  CHECK(bounded.step().failed);  // An outside-bound clamp must not enlarge a step.
 
   YawController::Config reverseConfig;
   reverseConfig.yaw_correction_sign = -1.0;
@@ -2169,21 +2481,24 @@ void testYawCancellationBoundsAndValidation() {
   output = reverse.step();
   CHECK(output.adjusting && near(output.yaw_rad, -reverse.config.step_rad));
 
-  // A released/idle motor must not resume a strong hold at an old target.
+  // Paused alignment keeps one settled hold through small encoder drift.
   YawHarness idle;
   idle.input.allow_alignment = false;
   idle.input.yaw_rad = 1.0 * kDeg;
   output = idle.step();
-  CHECK(!output.adjusting && near(output.yaw_rad, idle.input.yaw_rad));
+  CHECK(!output.adjusting && near(output.yaw_rad, 0.0));
   idle.input.allow_alignment = true;
-  idle.input.yaw_rad = 2.3 * kDeg;
+  idle.input.yaw_rad = 1.0 * kDeg + idle.config.step_rad + 0.3 * kDeg;
   output = idle.step();
   CHECK(!output.adjusting && output.waiting_for_capture);
   CHECK(near(output.yaw_rad, idle.input.yaw_rad));
 
   YawHarness jump;
   jump.input.yaw_rad = 5.1 * kDeg;
-  CHECK(jump.step().failed);
+  output = jump.step();
+  CHECK(!output.failed && output.feedback_recovery_required && output.feedback_jump_detected);
+  CHECK(near(output.motor_velocity_rad_s, 0.0));
+  CHECK(near(output.yaw_rad, 0.0));
   YawController::Config badConfig;
   badConfig.step_rad = 0.0;
   YawHarness invalid(badConfig);
@@ -2210,7 +2525,7 @@ void testYawCaptureWaitPreservesPositionTargetAndDeadline() {
       output = harness.step(0.4, false);
       CHECK(output.adjusting && !output.step_timed_out && !output.failed);
       CHECK(near(output.yaw_rad, fixedTarget));
-      CHECK(near(output.step_rad, sign * 1.0 * kDeg));
+      CHECK(near(output.step_rad, sign * harness.config.step_rad));
       CHECK(near(output.step_motion_rad, harness.input.yaw_rad - initialYaw));
     }
 
@@ -2220,7 +2535,7 @@ void testYawCaptureWaitPreservesPositionTargetAndDeadline() {
     output = harness.step(remaining + 0.01, false);
     CHECK(!output.adjusting && output.step_timed_out && output.waiting_for_capture);
     CHECK(near(output.yaw_rad, harness.input.yaw_rad));
-    CHECK(near(output.step_rad, sign * 1.0 * kDeg));
+    CHECK(near(output.step_rad, sign * harness.config.step_rad));
     CHECK(near(output.step_motion_rad, sign * 0.501 * kDeg));
 
     // A new camera capture and an elapsed pause cannot start another target
@@ -2235,27 +2550,28 @@ void testYawCaptureWaitPreservesPositionTargetAndDeadline() {
 }
 
 void testYawQuantizedFeedbackAndBlockedObservation() {
-  // A 1-degree step remains distinguishable with roughly 0.167-degree motor
+  // A 3-degree step remains distinguishable with roughly 0.167-degree motor
   // feedback increments; progress is held until within the 0.2-degree band.
   for (double sign : {-1.0, 1.0}) {
     YawHarness harness;
     harness.input.camera_x_error_m = sign * 0.05;
-    harness.input.requested_yaw_rad = sign * 2.0 * kDeg;
+    harness.input.requested_yaw_rad = sign * 5.0 * kDeg;
     auto output = harness.step();
-    CHECK(output.adjusting && near(output.yaw_rad, sign * 1.0 * kDeg));
+    CHECK(output.adjusting && near(output.yaw_rad, sign * harness.config.step_rad));
     const double fixedTarget = output.yaw_rad;
     harness.input.allow_new_target = false;
-    for (int tick = 1; tick <= 4; ++tick) {
+    for (int tick = 1; tick <= 16; ++tick) {
       harness.input.yaw_rad = sign * tick * 0.167 * kDeg;
       output = harness.step(0.1);
       CHECK(output.adjusting && !output.step_timed_out);
       CHECK(near(output.yaw_rad, fixedTarget));
     }
-    harness.input.yaw_rad = sign * 0.835 * kDeg;
+    const double reachedYaw = sign * (harness.config.step_rad - 0.161 * kDeg);
+    harness.input.yaw_rad = reachedYaw;
     output = harness.step(0.1);
     CHECK(!output.adjusting && !output.step_timed_out && output.waiting_for_capture);
     CHECK(near(output.yaw_rad, harness.input.yaw_rad));
-    CHECK(near(output.step_motion_rad, sign * 0.835 * kDeg));
+    CHECK(near(output.step_motion_rad, reachedYaw));
     const double settledHold = output.yaw_rad;
     const auto stopStamp = harness.input.camera_now_ns;
 
@@ -2289,12 +2605,404 @@ void testYawQuantizedFeedbackAndBlockedObservation() {
   CHECK(initiallyBlocked.step().adjusting);
 }
 
+void testYawVelocityPulseDefaultsAndValidation() {
+  const YawController::Config defaults;
+  CHECK(near(defaults.step_rad, 3.0 * kDeg));
+  CHECK(near(defaults.motor_velocity_rad_s, 3.5));
+  CHECK(near(defaults.velocity_pulse_sec, 0.015));
+
+  // Velocity authorization uses the motor command units from teleoperation,
+  // independently of a tiny or lagging core request.
+  for (double sign : {-1.0, 1.0}) {
+    YawHarness harness;
+    harness.input.requested_yaw_rad = sign * 0.01 * kDeg;
+    harness.input.camera_x_error_m = sign * 0.05;
+    auto output = harness.step();
+    CHECK(output.adjusting && !output.failed);
+    CHECK(near(output.motor_velocity_rad_s, sign * 3.5));
+    const double fixedTarget = output.yaw_rad;
+    harness.input.allow_new_target = false;
+    harness.input.yaw_rad = sign * 0.5 * kDeg;
+    output = harness.step(defaults.velocity_pulse_sec + 0.01, false);
+    CHECK(output.adjusting && near(output.yaw_rad, fixedTarget));
+    CHECK(near(output.motor_velocity_rad_s, sign * 3.5));
+
+    // A STOP/tracking interruption removes velocity authorization immediately.
+    harness.input.allow_alignment = false;
+    output = harness.step(0.001, false);
+    CHECK(!output.adjusting && output.waiting_for_capture);
+    CHECK(near(output.motor_velocity_rad_s, 0.0));
+  }
+
+  for (double speed : {0.0, -3.5, 5.001,
+                       std::numeric_limits<double>::infinity(),
+                       std::numeric_limits<double>::quiet_NaN()}) {
+    YawController::Config config;
+    config.motor_velocity_rad_s = speed;
+    YawHarness invalid(config);
+    const auto output = invalid.step();
+    CHECK(output.failed && !output.adjusting);
+    CHECK(near(output.motor_velocity_rad_s, 0.0));
+  }
+  for (double duration : {0.0, -0.01, 0.050001,
+                          std::numeric_limits<double>::infinity()}) {
+    YawController::Config config;
+    config.velocity_pulse_sec = duration;
+    YawHarness invalid(config);
+    const auto output = invalid.step();
+    CHECK(output.failed && !output.adjusting);
+    CHECK(near(output.motor_velocity_rad_s, 0.0));
+  }
+  YawController::Config oversizedStep;
+  oversizedStep.step_rad = 5.001 * kDeg;
+  YawHarness invalidStep(oversizedStep);
+  auto output = invalidStep.step();
+  CHECK(output.failed && !output.adjusting);
+  CHECK(near(output.motor_velocity_rad_s, 0.0));
+
+  YawController::Config oversizedDeadband;
+  oversizedDeadband.target_deadband_rad = 1.001 * kDeg;
+  YawHarness invalidDeadband(oversizedDeadband);
+  output = invalidDeadband.step();
+  CHECK(output.failed && !output.adjusting);
+  CHECK(near(output.motor_velocity_rad_s, 0.0));
+
+  YawHarness invalidFeedback;
+  CHECK(invalidFeedback.step().adjusting);
+  invalidFeedback.input.yaw_rad = std::numeric_limits<double>::quiet_NaN();
+  output = invalidFeedback.step();
+  CHECK(output.failed && !output.adjusting);
+  CHECK(near(output.motor_velocity_rad_s, 0.0));
+
+  YawHarness reset;
+  CHECK(reset.step().adjusting);
+  reset.controller.reset();
+  output = reset.step();
+  CHECK(output.failed && !output.adjusting);
+  CHECK(near(output.motor_velocity_rad_s, 0.0));
+}
+
+void testYawPostPulseFeedbackRefreshesBaseline() {
+  // Hardware observes the latest CAN receipt after each monitored pulse. A
+  // second movement is compared with that receipt, not the pre-pulse angle.
+  for (double sign : {-1.0, 1.0}) {
+    const double initialYaw = 489.52 * kDeg;
+    YawHarness harness(YawController::Config{}, initialYaw);
+    harness.input.camera_x_error_m = sign * 0.05;
+    harness.input.requested_yaw_rad = initialYaw + sign * 2.0 * kDeg;
+    auto output = harness.step();
+    CHECK(output.adjusting);
+
+    harness.input.yaw_rad = initialYaw + sign * 3.0 * kDeg;
+    output = harness.observe(harness.config.velocity_pulse_sec);
+    CHECK(!output.failed && !output.feedback_recovery_required && !output.feedback_jump_detected);
+    harness.input.yaw_rad += sign * 0.3 * kDeg;
+    output = harness.step(0.01, false);
+    CHECK(!output.failed && !output.feedback_recovery_required && !output.feedback_jump_detected);
+    CHECK(!output.adjusting && output.waiting_for_capture);
+    CHECK(near(output.yaw_rad, harness.input.yaw_rad));
+
+    // Subsequent real receipts continue updating the trusted feedback, even
+    // when pitch centering blocks a new visual yaw correction.
+    harness.input.allow_new_target = false;
+    harness.input.yaw_rad += sign * 3.0 * kDeg;
+    output = harness.observe();
+    CHECK(!output.failed && !output.feedback_recovery_required);
+    harness.input.yaw_rad += sign * 3.0 * kDeg;
+    output = harness.observe();
+    CHECK(!output.failed && !output.feedback_recovery_required);
+  }
+}
+
+void testYawSmallRecoilPreservesCoarseTargetAndDeadline() {
+  const double initialYaw = 510.4 * kDeg;
+  for (double sign : {-1.0, 1.0}) {
+    YawHarness harness(YawController::Config{}, initialYaw);
+    harness.input.camera_x_error_m = sign * 0.12;
+    auto output = harness.step();
+    CHECK(output.adjusting && !output.feedback_recovery_required);
+    const double fixedTarget = initialYaw + sign * 3.0 * kDeg;
+    CHECK(near(output.yaw_rad, fixedTarget));
+    CHECK(near(output.motor_velocity_rad_s, sign * 3.5));
+    harness.input.allow_new_target = false;
+    const auto captureStamp = harness.input.pose_stamp_ns;
+
+    // The motor can recoil against friction or backlash between pulses. A
+    // fresh, ordinary-sized reply in the opposite direction is still valid
+    // position feedback; it must not cancel this target or demand recovery.
+    for (int recoil = 1; recoil <= 3; ++recoil) {
+      harness.input.yaw_rad = initialYaw - sign * recoil * kDeg;
+      output = harness.observe(0.01, false);
+      CHECK(!output.failed && !output.feedback_recovery_required);
+      CHECK(!output.feedback_jump_detected && output.adjusting);
+      CHECK(!output.waiting_for_capture && near(output.yaw_rad, fixedTarget));
+      // Reusing that accepted reply for the command tick cannot invent a new
+      // target, restart an observation, or reduce the working movement speed.
+      output = harness.step(0.1, false, false);
+      CHECK(output.adjusting && !output.failed && !output.feedback_recovery_required);
+      CHECK(!output.waiting_for_capture && !output.step_timed_out);
+      CHECK(near(output.yaw_rad, fixedTarget));
+      CHECK(near(output.motor_velocity_rad_s, sign * 3.5));
+      CHECK(near(output.step_motion_rad, -sign * recoil * kDeg));
+      CHECK(harness.input.pose_stamp_ns == captureStamp);
+    }
+
+    // Continue toward the original target with no new camera capture. Only
+    // actually crossing that target starts the normal stopped observation.
+    harness.input.yaw_rad = initialYaw;
+    output = harness.step(0.1, false);
+    CHECK(output.adjusting && !output.feedback_recovery_required);
+    CHECK(near(output.yaw_rad, fixedTarget));
+    harness.input.yaw_rad = initialYaw + sign * kDeg;
+    output = harness.step(0.1, false);
+    CHECK(output.adjusting && near(output.yaw_rad, fixedTarget));
+    harness.input.yaw_rad = initialYaw + sign * 3.2 * kDeg;
+    output = harness.step(0.1, false);
+    CHECK(!output.adjusting && output.waiting_for_capture);
+    CHECK(!output.failed && !output.feedback_recovery_required && !output.step_timed_out);
+    CHECK(near(output.yaw_rad, harness.input.yaw_rad));
+    CHECK(near(output.step_motion_rad, sign * 3.2 * kDeg));
+
+    // Recoil also cannot extend a stalled correction beyond its original
+    // two-second deadline, even if new-target creation stays blocked.
+    YawHarness stalled(YawController::Config{}, initialYaw);
+    stalled.input.camera_x_error_m = sign * 0.12;
+    output = stalled.step();
+    const double stepStartTime = stalled.input.now_sec;
+    stalled.input.allow_new_target = false;
+    for (int recoil = 1; recoil <= 4; ++recoil) {
+      stalled.input.yaw_rad = initialYaw - sign * recoil * kDeg;
+      output = stalled.observe(0.01, false);
+      CHECK(output.adjusting && !output.feedback_recovery_required);
+      output = stalled.step(0.39, false, false);
+      CHECK(output.adjusting && !output.step_timed_out);
+      CHECK(!output.feedback_recovery_required && !output.waiting_for_capture);
+      CHECK(near(output.yaw_rad, fixedTarget));
+      CHECK(near(output.motor_velocity_rad_s, sign * 3.5));
+    }
+    stalled.input.yaw_rad = initialYaw - sign * 5.0 * kDeg;
+    output = stalled.observe(0.01, false);
+    CHECK(output.adjusting && !output.feedback_recovery_required);
+    const double remaining = stalled.config.adjustment_timeout_sec -
+        (stalled.input.now_sec - stepStartTime);
+    output = stalled.step(remaining + 0.01, false, false);
+    CHECK(!output.adjusting && output.step_timed_out && output.waiting_for_capture);
+    CHECK(!output.failed && !output.feedback_recovery_required);
+    CHECK(near(output.yaw_rad, stalled.input.yaw_rad));
+    CHECK(near(output.step_rad, sign * 3.0 * kDeg));
+    CHECK(near(output.step_motion_rad, -sign * 5.0 * kDeg));
+  }
+}
+
+void testYawJumpRecoveryNeedsDistinctCanReceiptsAndCapture() {
+  const double initialYaw = 489.52 * kDeg;
+  YawHarness harness(YawController::Config{}, initialYaw);
+  CHECK(harness.step().adjusting);
+  harness.input.yaw_rad = initialYaw + 5.1 * kDeg;
+  auto output = harness.step();
+  CHECK(output.feedback_recovery_required && output.feedback_jump_detected && !output.failed);
+  CHECK(!output.adjusting && near(output.motor_velocity_rad_s, 0.0));
+  CHECK(near(output.feedback_jump_rad, 5.1 * kDeg));
+  CHECK(near(output.yaw_rad, initialYaw));
+
+  // A cached CAN reading and arbitrarily many camera captures are not new
+  // motor evidence. Recovery must not confirm the angle from repeated ticks.
+  for (int tick = 0; tick < 5; ++tick) {
+    output = harness.step(0.25, true, false);
+    CHECK(output.feedback_recovery_required && !output.failed && !output.adjusting);
+    CHECK(!output.feedback_jump_detected);
+    CHECK(near(output.yaw_rad, initialYaw));
+    CHECK(near(output.motor_velocity_rad_s, 0.0));
+  }
+
+  harness.input.yaw_rad = initialYaw + 5.2 * kDeg;
+  output = harness.observe(0.01, false);
+  CHECK(output.feedback_recovery_required && !output.failed);
+  CHECK(near(output.yaw_rad, initialYaw));
+  // Repeating the first agreeing receipt cannot serve as the second one.
+  output = harness.observe(0.25, true, false);
+  CHECK(output.feedback_recovery_required && near(output.yaw_rad, initialYaw));
+
+  harness.input.yaw_rad = initialYaw + 5.1 * kDeg;
+  output = harness.observe(0.01, false);
+  CHECK(output.feedback_recovery_required && !output.failed);
+  CHECK(near(output.yaw_rad, harness.input.yaw_rad));
+  const auto confirmationStamp = harness.input.camera_now_ns;
+  // A fresh capture cannot skip the observation pause, and the pause alone
+  // cannot reuse a camera image captured before the angle was confirmed.
+  harness.input.pose_stamp_ns = confirmationStamp + 1;
+  output = harness.step(harness.config.observation_pause_sec / 2.0, false);
+  CHECK(output.feedback_recovery_required && !output.adjusting);
+  harness.input.pose_stamp_ns = confirmationStamp;
+  output = harness.step(harness.config.observation_pause_sec, false);
+  CHECK(output.feedback_recovery_required && !output.adjusting);
+  output = harness.step(0.01, true);
+  CHECK(!output.feedback_recovery_required && !output.failed);
+}
+
+void testYawTransientLargeBurstChangeUsesFeedbackRecovery() {
+  YawHarness harness;
+  harness.input.require_recovery_capture = false;
+  CHECK(harness.step().adjusting);
+  // The pulse observed a >5-degree transient, but the stopped reply has
+  // returned near the original angle. Confirmation must still be required.
+  harness.input.yaw_rad = -0.7 * kDeg;
+  harness.input.force_feedback_confirmation = true;
+  auto output = harness.observe();
+  CHECK(output.feedback_recovery_required && !output.failed);
+  CHECK(!output.adjusting && near(output.motor_velocity_rad_s, 0.0));
+  CHECK(near(output.yaw_rad, 0.0));
+  harness.input.force_feedback_confirmation = false;
+  output = harness.observe();
+  CHECK(output.feedback_recovery_required && !output.failed);
+  output = harness.observe();
+  CHECK(!output.feedback_recovery_required && !output.failed);
+  CHECK(near(output.yaw_rad, harness.input.yaw_rad));
+}
+
+void testYawOneOffBadFrameAndConfirmedLargeHeading() {
+  const double initialYaw = 510.4 * kDeg;
+  YawHarness harness(YawController::Config{}, initialYaw);
+  harness.input.allow_alignment = false;
+  harness.input.require_recovery_capture = false;
+  harness.input.yaw_rad = initialYaw + 40.0 * kDeg;
+  auto output = harness.observe();
+  CHECK(!output.failed && output.feedback_recovery_required && output.feedback_jump_detected);
+  CHECK(near(output.yaw_rad, initialYaw));
+
+  // Returning from a single implausible frame changes the recovery candidate;
+  // two further agreeing receipts establish the original angle again.
+  harness.input.yaw_rad = initialYaw;
+  output = harness.observe();
+  CHECK(output.feedback_recovery_required && !output.failed);
+  output = harness.observe();
+  CHECK(output.feedback_recovery_required && !output.failed);
+  output = harness.observe();
+  CHECK(!output.feedback_recovery_required && !output.failed);
+  CHECK(near(output.yaw_rad, initialYaw));
+
+  // A later finite heading 40 degrees away can be accepted after two new
+  // agreeing CAN replies. Displacement from docking start is not a failure.
+  harness.input.yaw_rad = initialYaw + 40.0 * kDeg;
+  output = harness.observe();
+  CHECK(output.feedback_recovery_required && !output.failed);
+  output = harness.observe();
+  CHECK(output.feedback_recovery_required && !output.failed);
+  output = harness.observe();
+  CHECK(!output.failed && !output.feedback_recovery_required && !output.adjusting);
+  CHECK(near(output.yaw_rad, harness.input.yaw_rad));
+  CHECK(near(output.motor_velocity_rad_s, 0.0));
+}
+
+void testYawRecoveryCanOnlyResumeAndUnstableFramesStayStopped() {
+  YawHarness harness;
+  harness.input.require_recovery_capture = false;
+  harness.input.allow_alignment = false;
+  harness.input.allow_new_target = false;
+  harness.input.yaw_rad = 6.0 * kDeg;
+  auto output = harness.observe(0.01, false);
+  CHECK(output.feedback_recovery_required && !output.failed);
+  harness.input.yaw_rad = 6.1 * kDeg;
+  output = harness.observe(0.01, false);
+  CHECK(output.feedback_recovery_required);
+  harness.input.yaw_rad = 8.0 * kDeg;
+  output = harness.observe(0.01, false);
+  CHECK(output.feedback_recovery_required && !output.failed);
+  CHECK(near(output.yaw_rad, 0.0));
+  harness.input.yaw_rad = 8.1 * kDeg;
+  output = harness.observe(0.01, false);
+  CHECK(output.feedback_recovery_required);
+  harness.input.yaw_rad = 8.2 * kDeg;
+  output = harness.observe(0.01, false);
+  CHECK(!output.feedback_recovery_required && !output.failed);
+  CHECK(near(output.yaw_rad, harness.input.yaw_rad));
+  CHECK(!output.adjusting && near(output.motor_velocity_rad_s, 0.0));
+  // Port preparation/insertion can recover CAN feedback with no new camera
+  // capture, and cannot accidentally enable visual yaw pulses.
+  output = harness.step(0.25, false);
+  CHECK(!output.feedback_recovery_required && !output.failed && !output.adjusting);
+  CHECK(near(output.motor_velocity_rad_s, 0.0));
+}
+
+void testYawRecoveryRejectsDriftingConfirmationChain() {
+  YawHarness harness;
+  harness.input.require_recovery_capture = false;
+  harness.input.allow_alignment = false;
+  harness.input.yaw_rad = 5.1 * kDeg;
+  auto output = harness.observe();
+  CHECK(output.feedback_recovery_required && output.feedback_jump_detected);
+  harness.input.yaw_rad = 6.0 * kDeg;
+  output = harness.observe();
+  CHECK(output.feedback_recovery_required && !output.failed);
+  harness.input.yaw_rad = 6.9 * kDeg;
+  output = harness.observe();
+  CHECK(output.feedback_recovery_required && !output.failed);
+  CHECK(near(output.yaw_rad, 0.0));
+  CHECK(!output.adjusting && near(output.motor_velocity_rad_s, 0.0));
+
+  // Each adjacent change was less than one degree, but the confirming replies
+  // must agree with one fixed candidate, not a moving previous-frame anchor.
+  harness.input.yaw_rad = 7.0 * kDeg;
+  output = harness.observe();
+  CHECK(output.feedback_recovery_required && !output.failed);
+  harness.input.yaw_rad = 6.9 * kDeg;
+  output = harness.observe();
+  CHECK(!output.feedback_recovery_required && !output.failed);
+  CHECK(near(output.yaw_rad, harness.input.yaw_rad));
+  CHECK(!output.adjusting && near(output.motor_velocity_rad_s, 0.0));
+}
+
+void testDockingYawHoldResynchronizationAcceptsAnyFiniteHeading() {
+  for (Phase phase : {Phase::SEARCH, Phase::INSERT}) {
+    Harness harness;
+    const double originalYaw = harness.input.yaw_rad;
+    harness.reach(phase);
+    CHECK(harness.controller.phase() == phase);
+
+    const double recoveredYaw = originalYaw + 40.0 * kDeg;
+    CHECK(harness.controller.resynchronizeYawHold(recoveredYaw));
+    harness.input.yaw_rad = recoveredYaw;
+    auto output = harness.step();
+    CHECK(output.phase == phase);
+    CHECK(near(output.yaw_rad, recoveredYaw));
+
+    // Invalid feedback still cannot replace the confirmed finite hold target.
+    CHECK(!harness.controller.resynchronizeYawHold(
+        std::numeric_limits<double>::quiet_NaN()));
+    CHECK(!harness.controller.resynchronizeYawHold(
+        std::numeric_limits<double>::infinity()));
+    CHECK(!harness.controller.resynchronizeYawHold(
+        -std::numeric_limits<double>::infinity()));
+    output = harness.step();
+    CHECK(output.phase == phase);
+    CHECK(near(output.yaw_rad, recoveredYaw));
+
+    const double reverseRecoveredYaw = originalYaw - 40.0 * kDeg;
+    CHECK(harness.controller.resynchronizeYawHold(reverseRecoveredYaw));
+    harness.input.yaw_rad = reverseRecoveredYaw;
+    output = harness.step();
+    CHECK(output.phase == phase);
+    CHECK(near(output.yaw_rad, reverseRecoveredYaw));
+    if (phase == Phase::INSERT) {
+      CHECK(output.actuation == Actuation::INSERT_HOLD_PITCH);
+      CHECK(near(output.zipper_motor_velocity_rad_s, harness.config.insertion_velocity_rad_s));
+    } else {
+      CHECK(output.actuation == Actuation::TRACK_POSE);
+      CHECK(near(output.extension_m, harness.input.extension_m));
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
   try {
     testSearch();
     testPitchCenteringAndHolding();
+    testAdaptivePitchCoarseFineAndDirections();
+    testAdaptivePitchSmoothTransition();
+    testAdaptivePitchRemainingErrorAndReversal();
+    testAdaptivePitchConfiguration();
     testInsertionHandoff();
     testInsertionPriorityAndFastHook();
     testCloseRangeHandoffRegression();
@@ -2328,12 +3036,24 @@ int main() {
     testDockFreshnessAndLatchTimeout();
     testValidationResetAndBurstWait();
     testYawAlignmentPhaseGuard();
+    testYawThreeCentimeterLateralDeadband();
     testYawSmallRequestsFullStep();
+    testYawCameraDirectionSurvivesLaggingCoreTarget();
+    testYawCumulativeSmallStepsContinueBeyondThirtyDegrees();
     testYawTimeoutMotionReporting();
     testYawStepsObservationAndDirection();
-    testYawCancellationBoundsAndValidation();
+    testYawCancellationSettledHoldAndValidation();
     testYawCaptureWaitPreservesPositionTargetAndDeadline();
     testYawQuantizedFeedbackAndBlockedObservation();
+    testYawVelocityPulseDefaultsAndValidation();
+    testYawPostPulseFeedbackRefreshesBaseline();
+    testYawSmallRecoilPreservesCoarseTargetAndDeadline();
+    testYawJumpRecoveryNeedsDistinctCanReceiptsAndCapture();
+    testYawTransientLargeBurstChangeUsesFeedbackRecovery();
+    testYawOneOffBadFrameAndConfirmedLargeHeading();
+    testYawRecoveryCanOnlyResumeAndUnstableFramesStayStopped();
+    testYawRecoveryRejectsDriftingConfirmationChain();
+    testDockingYawHoldResynchronizationAcceptsAnyFiniteHeading();
     std::cout << "All autonomous docking controller tests passed\n";
     return 0;
   } catch (const std::exception& error) {

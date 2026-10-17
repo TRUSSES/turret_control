@@ -2,13 +2,16 @@
 #define TURRET_H_
 
 #include "cubemars_pi3hat.h"
+#include "docking_pitch_control.h"
 #include "encoder.h"
 #include "limit_switch.h"
 #include "spiral_zipper.h"
+#include "undocking_cable_control.h"
 #include <atomic>
 #include <yaml-cpp/yaml.h>
 #include <chrono>
 #include <memory>
+#include <string>
 
 class Turret {
  public:
@@ -22,6 +25,9 @@ class Turret {
                          bool hold_pitch = false, bool prioritize_pitch = false,
                          double max_pitch_motor_velocity_rad_s = 0.0);
   bool ActuateFinalInsertionFreePitch(float goal_dist, float max_zipper_velocity);
+  // Tune only autonomous docking/undocking pitch corrections and joint holds.
+  void ConfigureDockingPitchControl(
+      const turret_control::DockingPitchController::Config& config);
   // Center the measured turret pitch while keeping the zipper stopped.
   void ActuateDockingPitch(double target_pitch_rad,
                           double max_pitch_motor_velocity_rad_s);
@@ -35,10 +41,11 @@ class Turret {
                               double max_pitch_motor_velocity_rad_s = 0.0);
   // Retract directly at negative motor velocity while controlling joint pitch.
   // Stop the zipper at the extension floor, home switch, or measured pitch cap;
-  // keep correcting pitch while stopped.
+  // keep correcting pitch while stopped. Measured zipper travel also drives
+  // simultaneous cable takeup before a pitch error develops.
   void ActuateUndockingRetraction(double zipper_motor_velocity_rad_s,
                                  double target_pitch_rad, double minimum_extension_m,
-                                 double max_pitch_motor_velocity_rad_s = 0.35,
+                                 double max_pitch_motor_velocity_rad_s = 1.20,
                                  double maximum_pitch_rad = 1.0995574287564276); // 63 deg
   bool ActuateFixedVelocityPitchAndZipper(float goal_dist,
                                           float max_zipper_velocity,
@@ -77,6 +84,29 @@ class Turret {
   void SetPitchVelocity(double velocity);
   void SetYawVelocity(double velocity);
   void HoldYawPosition(double desired_angle_rad, double kp = 8.0, double kd = 2.0);
+  struct DockingYawPulseResult {
+    // A reply gap stopped the pulse; it does not invalidate a later fresh reply.
+    bool feedback_interrupted = false;
+    // True only when the stop command receives a new, fresh yaw reply. The
+    // caller must still validate its position and drive status before holding.
+    bool fresh_stopped_feedback = false;
+    // A movement over five degrees needs independent position confirmation.
+    bool position_discontinuity = false;
+    // Largest travel opposite the requested direction, measured from the pulse
+    // start. Small recoil is diagnostic and does not cancel the fixed target.
+    double reverse_motion_rad = 0.0;
+  };
+  // Drive one monitored, short velocity burst toward a fixed yaw position.
+  // The caller bounds target creation and keeps its original completion deadline.
+  // Always brake before returning; cached replies cannot establish stopped
+  // feedback. Small valid reverse motion continues toward the same target.
+  // No velocity command remains active between calls.
+  DockingYawPulseResult ActuateDockingYawVelocity(
+      double signed_velocity_rad_s,
+      double fixed_target_rad, double max_pulse_sec,
+      double hold_kp, double hold_kd,
+      double feedback_timeout_sec,
+      double target_tolerance_rad = 0.003490658503988659); // 0.2 deg
   void StopAllMotors();
   void RequestZeroAbort();
   void ClearZeroAbort();
@@ -90,6 +120,8 @@ class Turret {
   // Position feedback methods
   double GetYawAngle() const;       // Get yaw position from motor feedback (radians)
   bool HasFreshYawFeedback(double max_age_sec) const;
+  std::uint64_t GetYawFeedbackSequence() const;  // Valid decoded yaw replies only
+  std::string GetYawFeedbackDiagnostics() const;
   double GetPitchMotorAngle() const;  // Get pitch motor position (radians)
   double GetYawMotorVelocity() const;    // Get yaw motor velocity (rad/s)
   double GetYawMotorTorque() const;      // Get yaw motor torque feedback
@@ -126,6 +158,8 @@ class Turret {
   const double pitch_coupling_gain_ = 0.35;
   const double jacobian_damping_ = 0.02;
   double final_insertion_pitch_motor_velocity_radps_ = 1.5;
+  turret_control::DockingPitchController docking_pitch_controller_;
+  turret_control::UndockingCableController undocking_cable_controller_;
 
   double GetPitchCableLength() const;
   double ComputeDockingPitchMotorVelocity(double target_pitch_rad,

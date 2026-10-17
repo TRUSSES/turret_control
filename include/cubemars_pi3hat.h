@@ -2,6 +2,8 @@
 #define CUBEMARS_PI3HAT_H
 
 #include <chrono>
+#include <cstdint>
+#include <string>
 #include <vector>
 #include "pi3hat.h"
 
@@ -10,6 +12,9 @@
 class CubemarsPi3Hat {
 public:
     CubemarsPi3Hat(int motor_id, int can_bus, mjbots::pi3hat::Pi3Hat* pi3hat);
+    ~CubemarsPi3Hat();
+    CubemarsPi3Hat(const CubemarsPi3Hat&) = delete;
+    CubemarsPi3Hat& operator=(const CubemarsPi3Hat&) = delete;
 
     // MIT Mode command functions
     void sendCommandMITMode(float pos, float vel, float kp, float kd, float torq);
@@ -24,11 +29,18 @@ public:
     float getTemperature() const;
     int getErrorFlag() const;
     bool HasRecentFeedback(double max_age_sec) const;
+    // Advances once per valid decoded reply, not once per command or getter.
+    std::uint64_t GetFeedbackSequence() const;
+    std::string GetFeedbackDiagnostics() const;
 
 private:
     int float_to_uint(float x, float x_min, float x_max, int bits);
     float uint_to_float(int x_int, float x_min, float x_max, int bits);
     bool unpackReply(const mjbots::pi3hat::CanFrame &frame);
+    // Called only while the shared transport mutex is held.
+    void cycleAndDispatchReplies();
+    void sendModeCommand(std::uint8_t command);
+    void observeBusFrame(const mjbots::pi3hat::CanFrame &frame);
 
     // Parameter limits for MIT mode
     static constexpr float P_MIN = -95.5f;
@@ -55,7 +67,15 @@ private:
     } motor_data_;
 
     bool have_feedback_ = false;
+    std::uint64_t feedback_sequence_ = 0;
     std::chrono::steady_clock::time_point last_feedback_time_;
+    std::uint64_t bus_frames_seen_ = 0;
+    std::uint64_t addressed_frames_seen_ = 0;
+    std::uint64_t rejected_size_frames_ = 0;
+    int last_frame_size_ = -1;
+    int last_payload_motor_id_ = -1;
+    std::uint32_t last_frame_can_id_ = 0;
+    int last_addressed_frame_size_ = -1;
 
     std::vector<mjbots::pi3hat::CanFrame> tx_can_;
     std::vector<mjbots::pi3hat::CanFrame> rx_can_;

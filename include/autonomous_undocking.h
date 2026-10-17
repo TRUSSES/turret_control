@@ -28,9 +28,10 @@ class AutonomousUndockingController {
     double target_extension_m = 0.10;
     double target_pitch_rad = 20.0 * kRadiansPerDegree;
     double intermediate_extension_m = 0.30;
-    double slow_clearance_m = 0.15;
+    double cruise_pitch_rad = 60.0 * kRadiansPerDegree;
+    double slow_clearance_m = 0.10;
     double slow_velocity_rad_s = 1.2;
-    double fast_velocity_rad_s = 1.8;
+    double fast_velocity_rad_s = 2.0;
     double extension_tolerance_m = 0.005;
     double pitch_tolerance_rad = 2.0 * kRadiansPerDegree;
     double pitch_min_rad = 0.0;
@@ -66,8 +67,8 @@ class AutonomousUndockingController {
     resume_phase_ = Phase::SLOW_RETRACT;
     last_time_sec_ = phase_start_sec_ = 0.0;
     initial_extension_m_ = initial_pitch_rad_ = initial_yaw_rad_ = 0.0;
-    slow_extension_m_ = tracked_pitch_rad_ = 0.0;
-    motion_started_ = pitch_tracking_started_ = false;
+    slow_extension_m_ = 0.0;
+    motion_started_ = cruise_pitch_started_ = false;
     pending_dock_command_ = DockCommand::NONE;
     last_dock_command_sec_ = 0.0;
     have_issued_dock_command_ = false;
@@ -111,11 +112,12 @@ class AutonomousUndockingController {
       holdFinal(input);
       return output_;
     }
-    if (motion_started_ && !pitch_tracking_started_ &&
+    if (motion_started_ && !cruise_pitch_started_ &&
         input.extension_m <= slow_extension_m_ + 1e-9) {
-      // Capture the clearance milestone even if this update also loses port
-      // feedback. Recovery must keep this reference rather than recapture it.
-      captureTrackedPitch(input);
+      // Keep the clearance milestone even if this update also loses port
+      // feedback. Recovery holds the fixed cruise target, without recapturing
+      // a measured angle that may have drifted during retraction.
+      beginCruisePitch();
     }
 
     if (pending_dock_command_ != DockCommand::NONE) {
@@ -203,12 +205,11 @@ class AutonomousUndockingController {
   double initial_pitch_rad_ = 0.0;
   double initial_yaw_rad_ = 0.0;
   double slow_extension_m_ = 0.0;
-  double tracked_pitch_rad_ = 0.0;
   DockCommand pending_dock_command_ = DockCommand::NONE;
   double last_dock_command_sec_ = 0.0;
   bool have_issued_dock_command_ = false;
   bool motion_started_ = false;
-  bool pitch_tracking_started_ = false;
+  bool cruise_pitch_started_ = false;
   bool waiting_for_post_settle_state_ = false;
   std::uint64_t dock_settle_sequence_ = 0;
   std::uint64_t recovery_state_sequence_ = 0;
@@ -230,12 +231,15 @@ class AutonomousUndockingController {
       config_.pitch_tolerance_rad, config_.dock_prepare_timeout_sec
     };
     for (double value : positive_values) if (!positive(value)) return false;
-    return finite(config_.target_pitch_rad) && finite(config_.pitch_min_rad) &&
+    return finite(config_.target_pitch_rad) && finite(config_.cruise_pitch_rad) &&
+        finite(config_.pitch_min_rad) &&
         finite(config_.pitch_max_rad) && config_.pitch_min_rad < config_.pitch_max_rad &&
         config_.pitch_max_rad <= 63.0 * kRadiansPerDegree &&
         config_.pitch_max_rad - config_.pitch_min_rad >= kRadiansPerDegree &&
         config_.target_pitch_rad >= config_.pitch_min_rad &&
         config_.target_pitch_rad <= config_.pitch_max_rad &&
+        config_.cruise_pitch_rad >= config_.pitch_min_rad &&
+        config_.cruise_pitch_rad <= config_.pitch_max_rad &&
         config_.pitch_tolerance_rad < 90.0 * kRadiansPerDegree &&
         config_.extension_tolerance_m <= config_.target_extension_m &&
         config_.intermediate_extension_m >
@@ -315,14 +319,14 @@ class AutonomousUndockingController {
   Output motion(const Input& input) {
     if (phase_ != Phase::FINAL_PITCH &&
         input.extension_m <= config_.target_extension_m + config_.extension_tolerance_m) {
-      captureTrackedPitch(input);
+      beginCruisePitch();
       enter(Phase::FINAL_PITCH, input.now_sec,
             "Undocking: target extension reached; zipper stopped, setting final pitch");
     } else if (phase_ == Phase::SLOW_RETRACT &&
                input.extension_m <= slow_extension_m_ + 1e-9) {
-      captureTrackedPitch(input);
+      beginCruisePitch();
       enter(Phase::FAST_RETRACT, input.now_sec,
-            "Undocking: clearance retracted; holding measured pitch while retracting faster");
+            "Undocking: clearance retracted; setting cruise pitch while retracting faster");
     }
     if (phase_ == Phase::FAST_RETRACT &&
         input.extension_m <= config_.intermediate_extension_m + config_.extension_tolerance_m) {
@@ -346,31 +350,29 @@ class AutonomousUndockingController {
       output_.zipper_motor_velocity_rad_s = -config_.slow_velocity_rad_s;
     } else if (phase_ == Phase::FAST_RETRACT) {
       output_.extension_m = config_.intermediate_extension_m;
-      output_.pitch_rad = tracked_pitch_rad_;
+      output_.pitch_rad = config_.cruise_pitch_rad;
       output_.zipper_motor_velocity_rad_s = -config_.fast_velocity_rad_s;
     } else {
       output_.extension_m = config_.target_extension_m;
       output_.pitch_rad = config_.target_pitch_rad;
       output_.zipper_motor_velocity_rad_s = -config_.fast_velocity_rad_s;
     }
-    if (pitch_tracking_started_ && input.pitch_rad > config_.pitch_max_rad) {
-      // Preserve the stage and captured reference. Retraction resumes only once
+    if (cruise_pitch_started_ && input.pitch_rad > config_.pitch_max_rad) {
+      // Preserve the stage and fixed reference. Retraction resumes only once
       // encoder feedback confirms pitch is back inside the configured ceiling.
       hold(input);
     }
     return output_;
   }
 
-  void captureTrackedPitch(const Input& input) {
-    if (pitch_tracking_started_) return;
-    tracked_pitch_rad_ = std::clamp(input.pitch_rad,
-                                  config_.pitch_min_rad, config_.pitch_max_rad);
-    pitch_tracking_started_ = true;
-    output_.pitch_rad = tracked_pitch_rad_;
+  void beginCruisePitch() {
+    if (cruise_pitch_started_) return;
+    cruise_pitch_started_ = true;
+    output_.pitch_rad = config_.cruise_pitch_rad;
   }
 
   void limitHeldPitch(const Input& input) {
-    if (!pitch_tracking_started_) return;
+    if (!cruise_pitch_started_) return;
     double upper_target = config_.pitch_max_rad;
     if (input.pitch_rad > config_.pitch_max_rad) {
       // A target at the ceiling can lie inside the pitch motor's deadband even

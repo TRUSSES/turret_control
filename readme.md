@@ -7,16 +7,23 @@ the control motors and starts the controller in `include/autonomous_docking.h`:
 
 1. **SEARCH:** hold the current extension and yaw, and pitch down until a fresh
    AprilTag pose becomes available. The default search covers the allowed pitch
-   range with a 5 degrees/second pitch target rate. It waits at the bounded
+   range with a 15 degrees/second pitch target rate. It waits at the bounded
    endpoint if the tag is still unavailable.
 2. **PITCH_CENTER:** keep the zipper stopped and adjust pitch until the tag is
-   within 1 degree of vertical center. Yaw continues correcting lateral error.
+   within 2 degrees of vertical center. Yaw continues correcting lateral error.
    Capture the measured pitch only after the camera confirms centering.
-3. **APPROACH:** extend at fixed zipper motor speed for up to 2 seconds while
-   holding that pitch with encoder feedback. Stop the zipper after each burst,
+   Within 25 cm, if pitch is within 1 degree of its limit and centering would
+   require moving past that limit, hold the measured pitch and permit a short
+   approach with fresh tracking and at most 6 degrees of vertical error. This
+   lets the last few millimetres of approach reach the existing insertion handoff.
+3. **APPROACH:** extend in motor-velocity bursts while holding that pitch with
+   encoder feedback. Between 45 and 25 cm, smoothly reduce zipper speed from
+   1.5 to 1.2 rad/s and burst duration from 2 seconds to 0.5 seconds.
+   Stop the zipper after each burst,
    wait for a camera capture taken after the stop, and adjust pitch before the
    next burst. Yaw continues correcting lateral error. If vertical error exceeds
-   4 degrees, stop and re-center immediately. A fresh pose at the 20 cm handoff
+   4 degrees, stop and re-center immediately, except for the bounded near-range
+   pitch-limit case above. A fresh pose at the 20 cm handoff
    ends camera alignment and starts dock preparation immediately.
 4. **WAIT_FOR_TAG:** if tracking is lost before insertion, stop all motors and
    wait. Fresh tracking returns to pitch centering from measured joint positions.
@@ -80,40 +87,46 @@ camera. Capture the docked extension, pitch, and yaw at the start.
    Allow four additional power cycles if preparation fails. The contact button
    may remain pressed while the turret starts withdrawing.
 2. Retract at **1.2 rad/s** while encoder feedback holds the original docking
-   pitch and yaw. Use measured zipper travel to finish the first **15 cm**;
+   pitch and yaw. Take up cable based on measured zipper movement, alongside
+   pitch correction, so the cable motor need not wait for pitch to drift.
+   Use measured zipper travel to finish the first **10 cm**;
    elapsed time does not trigger the speed change.
-3. After the 15 cm clearance, capture the measured pitch, capped at
-   **63 degrees**, and hold that angle while retracting at **1.8 rad/s** to
-   **30 cm extension**. Use joint encoder feedback to adjust the cable as the
-   zipper retracts. If measured pitch exceeds the cap, stop the zipper and
+3. After the 10 cm clearance, adjust pitch toward **60 degrees** while
+   retracting at **2.0 rad/s** to **30 cm extension**. Keep cable takeup and
+   pitch feedback active throughout retraction. If measured pitch exceeds
+   **63 degrees**, stop the zipper and
    correct pitch before resuming. This check also uses the fresh encoder
    reading immediately before applying the retraction command.
 4. At **30 cm extension**, adjust pitch toward **20 degrees** while continuing
-   retraction at **1.8 rad/s**. Stop the zipper at **10 cm extension**
+   retraction at **2.0 rad/s**. Stop the zipper at **10 cm extension**
    (5 mm tolerance), finish adjusting pitch
    within 2 degrees, then change the turret state to **READY**. Continue holding
    pitch and yaw in READY with the zipper stopped. IDLE releases that hold.
 
-If the starting extension leaves less than 15 cm above the 10 cm destination,
+If the starting extension leaves less than 10 cm above the 10 cm destination,
 the slow section ends at the destination and pitch adjusts with the zipper
 stopped. If clearance ends below 30 cm, go directly to the final pitch/retraction
 stage. Port feedback/readiness loss during withdrawal stops extension and
 holds the current target angles. Fresh powered/open feedback resumes from
-the preserved clearance progress and captured pitch; otherwise another bounded
+the preserved clearance progress and pitch target; otherwise another bounded
 power cycle can reopen the latch. Once READY is reached, holding the posture no longer depends
 on port feedback. Opening feedback also reports a commanded position rather
 than sensed physical latch movement.
 
 Tuning is under `undocking` in `config/config.yaml`, with ROS names prefixed
 `undocking_`. `slow_clearance_m`, `slow_velocity_rad_s`,
-`fast_velocity_rad_s`, `intermediate_extension_m`, `target_extension_m`,
-`target_pitch_deg`, and `pitch_max_deg` control the motion. The pitch cap
+`fast_velocity_rad_s`, `cruise_pitch_deg`, `intermediate_extension_m`,
+`target_extension_m`, `target_pitch_deg`, and `pitch_max_deg` control the motion. The pitch cap
 defaults to 63 degrees and may be lowered, but cannot be raised above 63 or
-the configured docking pitch limit. Port settling waits and `dock_retry_attempts`
+the configured docking pitch limit. Both requested pitch angles must fit within
+that limit. Port settling waits and `dock_retry_attempts`
 are independent of the docking controller's budget. The old timed pitch-only/combined-retraction
 settings have been replaced by encoder-based stages. Undocking shares the
-existing pitch motor velocity cap, yaw holding gains, and state freshness
-parameters from `docking`.
+fine pitch motor speed profile, yaw holding gains, and state freshness
+parameters from `docking`. Its own `pitch_motor_velocity_limit_rad_s` defaults
+to **1.2 rad/s**, allowing faster coarse corrections while retaining the fine
+speed taper near the requested pitch. This limit caps the combined cable
+takeup and pitch correction command.
 
 During automatic zeroing, the homing worker performs the encoder reads and
 zipper motor updates; the ROS update timer only checks whether that worker has
@@ -146,34 +159,77 @@ CAN cycles also leave GPIO 13 untouched: that pin is the configured pitch
 encoder data input. Each encoder explicitly initializes its CS/clock outputs
 and data input at startup.
 
+Pitch and yaw share Pi3Hat's CAN receive queue. Every command, including MIT
+entry/exit and motor zeroing, now routes all received replies to the motor named
+by the payload ID on that transport and bus. A yaw reply received during a pitch
+transaction updates yaw feedback instead of being discarded. Commands and
+feedback access are serialized across both motors. Mode-entry logs report that
+the command was sent; they do not claim that the motor acknowledged it.
+Shutdown uses ROS's deferred signal handling, with hardware stopping in ordinary
+cleanup after the zeroing worker has been aborted and joined. A signal handler
+never tries to re-enter the locked CAN transport.
+
 All tuning is in `config/config.yaml` under `docking`. These keys replace the
 older stage/acquire/final-insertion-distance settings. ROS overrides use the
 same names prefixed with `docking_`, such as `docking_approach_burst_duration_sec`.
+Docking's `pitch_max_deg` defaults to **70 degrees**. Undocking retains its
+separate **63-degree** ceiling and its existing requirement that starting pitch
+is within that ceiling; a dock completed above 63 degrees currently prevents
+UNDOCK from starting.
 `target_dock_id` selects `/dockN/state` and `/dockN/command` independently of
 `turret_id`; restart the node after changing that selection. `target_tag_frame`
 selects this turret's
 own `/vision/end_effector_tag_pose_camera/<tag_frame>` and
 `/vision/tag_visible/<tag_frame>` topics; restart after changing it too.
+The default target is `tag36h11_25` (family `36h11`, ID 25). The camera detector
+and pose bridge use this single docking ID so testing-area VIO tags cannot
+become docking targets. The active detector's physical size remains 0.056 m
+(5.6 cm); the compatibility detector YAML in this package uses the same size.
+Copy the matching camera package configuration and restart its nodes as well.
 `camera_frame` must match the AprilTag pose frame. The bridge's aggregate
 preferred/fallback stream remains available for visualization and cannot
 switch the autonomous controller to another turret's tag.
 The target dock and tag parameters are read-only after startup; other docking
 tuning changes take effect on the next DOCK request.
 
-Yaw docking corrections request one full 1-degree position step from the
-measured yaw at the start of each correction, clamped to the relative yaw
-bounds. The camera-guided core request supplies the direction; its small
-initial magnitude no longer reduces the step to almost the completion
-deadband. During the correction, `yaw_correction_kp` defaults to 250 and
-`yaw_correction_kd` to 1. Position holding uses `yaw_position_kp` = 160 and
-`yaw_position_kd` = 2, including insertion and automatic undocking.
+Far-range yaw alignment stops once the tag's camera-x error is **3 cm or less**, using
+`docking.lateral_deadband_m: 0.030`. An active correction is canceled at that
+threshold and the measured yaw becomes a fixed hold, while pitch and extension
+continue through the normal sequence. After reaching that window, new yaw
+corrections require error **greater than 5 cm**, configured by
+`yaw_resume_lateral_error_m: 0.050`, plus the existing fresh-camera observation
+checks. Error between 3 and 5 cm therefore keeps the settled hold instead of
+repeatedly starting and stopping near the cutoff. A new DOCK request starts
+coarse alignment again if its initial error is outside 3 cm. Once a fresh visual
+pose enters **45 cm**, switch to the near-range **1 cm stop / 2 cm restart**
+window (`near_yaw_lateral_deadband_m` / `near_yaw_lateral_resume_m`). Entering
+that region clears any earlier far-range acceptance, so a residual 2–3 cm error
+gets another correction. The tighter mode stays active for the rest of that
+DOCK request, avoiding repeated mode changes from noisy depth estimates.
+The legacy `lateral_tolerance_m` does not gate insertion, but must remain at
+least as large as `lateral_deadband_m`.
+
+When a coarse correction is needed, yaw requests one full 3-degree position step from the
+measured yaw at the start of each correction. The current signed camera
+lateral error supplies the direction directly; the core's older yaw setpoint
+cannot veto a correction after measured yaw passes it. There is no cumulative
+yaw travel limit relative to the heading at docking start. Drive toward that
+fixed target using the same velocity command as
+teleop: `yaw_motor_velocity_rad_s` defaults to **3.5 rad/s**, with the
+direction selected from the camera error. This matches the measured working
+speed above the mechanism's friction threshold. Position holding uses
+`yaw_position_kp` = 160 and `yaw_position_kd` = 2 between bursts, during
+insertion, and during automatic undocking.
 A target stays fixed until it is reached within
 `yaw_target_deadband_deg` (0.2 degrees) or `yaw_adjustment_timeout_sec`
 (2 seconds) expires. The configured MIT position range gives approximately
-0.167 degrees per feedback increment; the 1-degree target spans about six
-increments. The controller then holds the measured angle, waits at
+0.167 degrees per feedback increment; the 3-degree target spans about eighteen
+increments. New step sizes taper to **1.5 degrees** by 25 cm; an active target
+stays fixed while its step finishes. The controller then holds the measured angle, waits at
 least `yaw_observation_pause_sec` (0.2 seconds), and requires a camera capture
-taken after that stop before starting another correction. Cached poses cannot
+taken after that stop before starting another correction. The settled position
+target stays fixed during observation and while the camera is centered;
+ordinary encoder changes do not move the hold target. Cached poses cannot
 queue repeated yaw steps. Pitch search, dock preparation and final insertion
 hold their captured yaw without camera alignment corrections.
 The pitch controller's post-burst camera wait disables new yaw steps until
@@ -185,23 +241,90 @@ A yaw-step timeout logs the commanded step, measured movement, motor torque
 feedback, and drive error flag at most every five seconds, making an
 unresponsive motor visible without repeated per-step INFO messages.
 
-Yaw uses the MIT position command with zero requested velocity and feed-forward
-torque. Correction gains apply only while one bounded step is active;
-completed corrections switch back to the holding gains. The MIT encoder rounds
+The earlier position-only correction requested zero motor velocity. Correction
+now uses MIT velocity control (`kp=0`, `kd=0.3`) and zero feed-forward torque,
+matching `SetYawVelocity` in teleop. `yaw_velocity_pulse_sec` defaults to
+**0.015 seconds**, tapering to **0.008 seconds** for new corrections by 25 cm.
+The adapter uses the selected pulse duration for the entire active target.
+Actual yaw movement speed remains **3.5 rad/s** so short adjustments still
+overcome friction. Each short burst polls position/CAN feedback until the fixed
+target is reached/crossed or the pulse duration expires, then brakes at zero
+velocity. The controller validates the braking reply before holding its
+measured angle or starting another pulse.
+Repeated bursts can finish the same target; they cannot accumulate farther
+targets. The callback runs the bounded burst synchronously, normally up to
+15 ms plus its final CAN braking commands. A zero-speed high-damping command
+brakes before the current measured position becomes the held angle. No high-speed command is intentionally
+left running between callbacks. Small valid backward feedback changes are
+treated as position error toward the same fixed target, so recoil does not
+cancel the step or start a camera-recovery cycle. The original 2-second step
+deadline still applies; repeated recoil cannot extend it. A position change
+over 5 degrees inside a pulse stops the pulse and requires confirmation, even
+if the later stopped reply returns near the prior angle. Drive errors remain
+errors. The target is bounded when the controller creates it; backward movement
+does not cause a separate remaining-distance fault. If a new reply has already
+crossed the target before the next pulse starts, stop that pulse and complete
+the existing step on the next update.
+Velocity is limited to 5 rad/s, step size to 5 degrees, and burst duration to
+50 ms. The configured 3.5 rad/s is separate from `max_yaw_rate_deg_s`, which
+ramps the camera-guided request and does not set physical motor velocity.
+The obsolete `yaw_correction_kp`/`yaw_correction_kd` tuning keys are replaced
+by the velocity and pulse settings. The MIT encoder rounds
 and bounds each field to `2^bits - 1`, matching its decoder; maximum gains no
 longer overflow into adjacent command fields.
 Motor feedback must be recent (`yaw_feedback_timeout_sec`, default 0.25 seconds)
-before using the stronger position gain. If that age window expired during a
-callback delay, the controller stops all motors and sends up to three neutral
-yaw queries before checking again. Fresh yaw is read before capturing the
-insertion reference; an interrupted nudge is canceled before motion resumes.
-Missing replies after those queries, large feedback jumps
-or measured yaw outside its relative motion bound stop docking. The motor protocol's feedback angle is used
-directly; there is no additional yaw gearing conversion in this controller.
+before starting a correction. DOCK and UNDOCK acquire their initial yaw reference
+through stopped, zero-velocity queries for up to 0.5 seconds, requiring a newly
+decoded motor reply rather than merely a recent cached value. This startup
+acquisition interval is separate from the feedback-age limit. Dock-state messages
+queued during acquisition are received before checking the initial dock snapshot;
+the code does not renew freshness without an actual message. During a burst,
+feedback is checked after each CAN command with an age window of at most 5 ms.
+Missing replies brake the current pulse. Up to two stopped CAN queries require
+a newly decoded reply with a sequence newer than the corresponding query and
+an age within 5 ms. If that succeeds, validate the stopped angle and continue
+the same target without canceling the step or waiting for another camera
+capture. If stopped feedback is still missing, pause motion rather than
+permanently fail the attempt. Each subsequent control tick stops and sends neutral yaw queries;
+a new valid reply resumes the controller automatically and cancels an
+interrupted nudge. Phase deadlines and port settling/retry clocks pause with
+motion, while camera timestamps and dock-state freshness remain in real ROS
+time. The 2-second port-command spacing is preserved across these pauses.
+Visual approach also needs an image captured after the communication stop;
+insertion and port preparation retain their camera-independent joint holds.
+Fresh yaw is read before capturing the insertion reference.
+The yaw controller observes the latest valid CAN reply after every burst and
+braking hold, so its next comparison includes the movement it just commanded.
+A change over 5 degrees no longer fails the attempt immediately: stop the
+zipper, keep pitch held, brake yaw without commanding an unconfirmed angle,
+and confirm the position using two distinct new CAN replies within 1 degree.
+Re-reading a cached reply cannot satisfy this check. Visual alignment also
+waits for a camera capture taken after that confirmation and the observation
+pause before resuming; search and insertion use CAN confirmation alone.
+After CAN confirmation, the motor holds that fixed confirmed position while
+waiting for the camera. On recovery, confirmed measured yaw also replaces any
+old frozen hold target. Missing CAN replies stop motion while awaiting recovery;
+actual drive faults and invalid encoder values remain errors. Recovery is
+reported as a docking pause and does not
+set the permanent motor-command failure flag. The motor protocol's feedback
+angle is used directly; there is no additional yaw gearing conversion.
+
+Throttled messages distinguish a recovered CAN reply delay from small backward
+motion that keeps the same correction target. A large discontinuity retains
+the separate position-confirmation warning; small recoil no longer produces
+repeated "Yaw feedback recovered" camera waits.
+
+If startup still receives no yaw feedback, the failure includes motor ID, CAN
+bus, accepted-reply count and age, bus/own-ID frame counts, rejected frame sizes,
+and the last received payload/CAN IDs. This distinguishes no motor-11 reply
+from replies that arrive but cannot be decoded. The decoder still requires the
+existing eight-byte reply format; rejected or cached data never renews freshness.
 
 Separate yaw zeroing is not required for docking. Place the turret roughly
-facing the dock; DOCK reads its current yaw and applies the existing relative
-30-degree correction bound. Normal turret zeroing homes extension and pitch.
+facing the dock; DOCK reads its current yaw for the initial hold, and subsequent
+camera corrections use the measured heading without a relative travel cutoff.
+The former `yaw_limit_from_start_deg` setting has been removed. Normal turret
+zeroing homes extension and pitch.
 The optional `/turretN/zero_yaw` service defines the current heading as zero;
 it does not move the turret to a physical reference. To use it, align and stop
 yaw first, then call the service in IDLE or TELEOP_ZERO.
@@ -214,20 +337,48 @@ camera mounting requires an offset. Centering uses
 `atan2(goal_camera_y_m - camera_y_m, camera_z_m)`; angular tolerances remain
 meaningful as the camera-to-tag distance changes. The start/stop tolerances
 prevent repeated centering/extension transitions from small pose noise.
-`approach_burst_duration_sec` sets the maximum uninterrupted extension duration
-(default 2 seconds). `zipper_motor_velocity_rad_s` and
+`centering_start_tolerance_deg` accepts **2 degrees** of vertical camera error
+before an extension burst; `centering_stop_tolerance_deg` stops an active burst
+above **4 degrees**. Once accepted, hold the measured pitch instead of waiting
+for exact equality with a requested joint angle. The separate motor controller
+already accepts 0.5 degrees of joint-pitch error; that deadband is unchanged.
+`approach_burst_duration_sec` sets the far-range maximum uninterrupted extension
+duration (default 2 seconds). `approach_slowdown_start_m` (45 cm) and
+`approach_slowdown_end_m` (25 cm) define a shared smooth distance profile.
+`near_approach_burst_duration_sec` (0.5 seconds) and
+`near_zipper_motor_velocity_rad_s` (1.2 rad/s) define the near-range approach.
+The working 1.2 rad/s zipper minimum is retained. `zipper_motor_velocity_rad_s` and
 `insertion_velocity_rad_s` are direct motor angular speeds. Approach no longer
 uses changing position targets or the old `extension_gain`,
 `max_extension_rate_m_s`, and `max_extension_step_m` settings.
-Pitch/yaw target rates default to 5 degrees/second. The cable motor has a separate
-`pitch_motor_velocity_limit_rad_s` (default 0.35 rad/s). Centering and insertion
-retain the existing 0.20 rad/s minimum correction outside their 0.5-degree joint
-deadband. Approach uses the same encoder feedback while holding the captured
-pitch. Actual joint speed depends on the mechanism. During extension, pitch
-corrections restore the held angle if the mechanism drifts. The tighter camera
-centering tolerance continues pitch adjustment beyond the old 2-degree window;
-it does not impose an arbitrary downward angle or camera offset.
-Pitch/yaw and pre-insertion extension bounds remain active. Search, approach,
+Pitch targets now adapt to camera alignment error. Below
+`pitch_fine_error_deg` (3 degrees), centering uses `fine_pitch_rate_deg_s`
+(5 degrees/second) and `fine_pitch_step_deg` (2 degrees of lead over measured
+pitch). Between that error and `pitch_coarse_error_deg` (8 degrees), both limits
+blend smoothly toward `max_pitch_rate_deg_s` (15 degrees/second) and
+`max_pitch_step_deg` (6 degrees). Targets cannot lead farther than the remaining
+signed angular correction visible in the current image. Search uses
+`search_pitch_rate_deg_s` (15 degrees/second). These are target rates and lead
+limits; actual joint speed depends on cable geometry and load. The distance
+profile also scales pitch target rates and lead down to `near_pitch_scale`
+(0.5), giving smaller centering adjustments near the dock. The physical cable
+motor's fine-speed profile and working minimum remain in effect.
+
+The shared cable-motor controller in `include/docking_pitch_control.h` also
+adapts to measured joint-pitch error. It stops inside the existing 0.5-degree
+deadband. Outside it, speed rises smoothly from the working 0.20 rad/s minimum
+to `pitch_motor_fine_velocity_rad_s` (0.25 rad/s) at
+`pitch_motor_fine_error_deg` (2 degrees), then toward
+`pitch_motor_velocity_limit_rad_s` (0.80 rad/s) at
+`pitch_motor_coarse_error_deg` (6 degrees). Larger errors use the coarse cap;
+small errors slow down as the motor approaches the requested angle. This
+profile applies to docking search/centering, pitch holds during extension and
+insertion, undocking retraction, and the final READY posture. Undocking uses
+its separate 1.2 rad/s coarse cap. Normal manual
+control and zeroing retain their existing controllers. During extension and
+retraction, encoder feedback pays out or takes up cable to restore the held
+pitch when the mechanism drifts.
+Pitch and pre-insertion extension bounds remain active. Search, approach,
 and tracking pauses have no deadline. Latch-wait has its own timeout after
 contact has stopped the zipper and captured the joint hold.
 `dock_activate_settle_sec` (2 seconds), `dock_open_settle_sec` (1 second),
@@ -260,8 +411,10 @@ docking node's `servo1_zero_us`. Retained DOCKED alone cannot bypass the
 forced close cycle. Log messages describe command confirmation rather than
 claiming a physical latch measurement.
 
-Approach and insertion use a direct 1.2 rad/s zipper motor command, the measured
-minimum that moves the current spiral zipper. Tracking loss, contact and the
+Approach uses a direct zipper motor command, tapering from 1.5 to 1.2 rad/s near
+the dock. Final insertion uses
+1.4 rad/s while maintaining the handoff pitch and stopping on button contact.
+Tracking loss, contact and the
 approach extension bound can interrupt a burst before its deadline; the bound
 does not apply to final insertion. Update
 the Pi's YAML alongside the code; older YAML or ROS parameter overrides take
@@ -323,8 +476,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude \
 ```
 
 With ROS installed, `colcon test --packages-select turret_control` also runs
-the docking and undocking controller tests through CTest. The new undocking
-test source is `tests/test_autonomous_undocking.cpp`.
+the docking, undocking, adaptive pitch, cable takeup, and CAN reply-routing tests through CTest.
+The standalone pitch profile test source is `tests/test_docking_pitch_control.cpp`.
+Measured travel and cable command tests are in `tests/test_undocking_cable_control.cpp`.
+Reply ownership and registration tests are in `tests/test_cubemars_reply_router.cpp`.
+Near-range approach, pitch-limit progress, and yaw refinement sources are
+`tests/test_near_docking_approach.cpp` and `tests/test_near_docking_yaw.cpp`.
 
 ![Build: Manual](https://img.shields.io/badge/Build-Manual-informational?style=for-the-badge)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg?style=for-the-badge)](https://en.cppreference.com/w/cpp/17)
